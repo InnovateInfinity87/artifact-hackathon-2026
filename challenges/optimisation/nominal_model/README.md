@@ -1,0 +1,84 @@
+# Nominal model for the optimisation challenge
+
+An xsuite model of CLARA from the benchmark start (`cla_s02_sim_aper_01`) to the readout screen (`cla_feh_dia_scr_01`), with the magnet strengths of the lattice file, and a starting beam derived from the 4D phase space measured at S07. It is the starting point for the optimisation work: the beam is the best estimate of what CLARA delivered, and the lattice is the one the optimiser has to fix.
+
+## Contents
+
+| File | What it is |
+|---|---|
+| `xsuite_model.py` | the model: converts the Cheetah lattice JSON to an xsuite line, tracks forward and backward, computes optics from test particles, reads and writes distributions |
+| `initial_distribution.npz` | the nominal starting beam: 200,000 particles at `cla_s02_sim_aper_01`, 35.8055 MeV |
+| `example_nominal_model.py` | how to use it: tracks the beam to the readout, plots the screen and the optics into `figures/` |
+| `make_initial_distribution.py` | how the starting beam was built, with an `--longitudinal astra` variant |
+| `make_gpsr_lattice.py`, `CLARA_cheetah_S07_GPSR.json`, `s07_gpsr_tune.json` | the magnet settings of the 23 March 2026 S07 quadrupole scan, used to build the starting beam |
+| `requirements.txt` | package versions the model was validated with |
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+python example_nominal_model.py
+```
+
+The first run compiles the kernel of the custom RF-focusing element, which takes a few seconds. In your own code:
+
+```python
+import xsuite_model as model
+
+start, energy_ev, metadata = model.load_distribution()  # (N, 6) at cla_s02_sim_aper_01
+converted = model.build_line(energy_ev)  # lattice-file strengths, start to readout
+final = model.track_forward(converted, start)  # (N, 6) at cla_feh_dia_scr_01
+# beta, alpha and D along s, starting from the beam's projected Twiss
+optics = model.optics_along(converted, model.twiss_from_coordinates(start))
+```
+
+`build_line` also takes `lattice_json=` (any Cheetah lattice JSON with the CLARA_FEBE sequence) and `end=` (any element name). To change a magnet during an optimisation, set it on the xsuite line directly, for example `converted.line["cla_feh_mag_quad_01"].k1 = 2.0`; magnets keep their Cheetah names, while cavities are split into pieces named `<cavity>..*`.
+
+![Beam on the readout screen](figures/final_screen.png)
+
+![Optics of the nominal model](figures/optics.png)
+
+## The starting beam
+
+The transverse plane comes from measurement: the GPSR reconstruction at `CLA-S07-SIM-APER-01` (`data/clara/lattice_data/CLA-S07-SIM-APER-01.hdf`), made from the scan of S07-QUAD-05 on 23 March 2026. The longitudinal plane comes from the model: `score.sample_beam` at severity 0 is injected at the start and tracked forward to S07, and its (τ, δ) are attached there to the reconstructed particles at random. The 6D beam is then tracked back to the start in xsuite through the magnet settings that were on the machine during the scan (`CLARA_cheetah_S07_GPSR.json`). Tracking it forward again returns the reconstruction to 7 × 10⁻¹³ of its rms.
+
+| At `cla_s02_sim_aper_01` | x | y |
+|---|---|---|
+| β, α | 13.2 m, −4.93 | 34.7 m, −5.73 |
+| εn projected | 8.42 µm | 4.03 µm |
+| εn in energy slices | 7.6 to 8.3 µm | 2.9 to 3.2 µm |
+| σ | 1.26 mm | 1.41 mm |
+
+σz is 0.688 mm, σδ 0.934 %, and the x–y correlation +0.31 (it comes from the reconstruction).
+
+The projected emittances are larger than in any single energy slice because each slice has its own orientation in phase space, which the chromatic transport to S07 lines back up; each slice carries the measured emittance. A beam without these energy-dependent correlations, given the same 0.93 % energy spread, would reach S07 39 % above the measured vertical emittance and 7 % above the horizontal one. The real energy spread during the scan therefore matters, and it is not known yet.
+
+This beam is far from the one in `score.sample_beam`: its horizontal emittance is 3.4 times larger and its x–y coupling is absent there.
+
+## The nominal magnet strengths
+
+`build_line` uses the strengths stored in `data/clara/lattice_data/CLARA_cheetah.json`: FEA dogleg on with its dispersion closed at the readout, sextupoles and correctors at zero, VBC chicane flat. These optics are not matched to this beam. At the readout the beam is 3.1 × 25 mm rms and βy is 7 × 10⁴ m, and the energy spread (2.1 % at S07) inflates the projected emittance. That is the problem the optimisation has to solve.
+
+The starting beam was built through the scan settings because those produced the measured phase space. At the start it is just a beam, and it can be tracked through any settings.
+
+## Variant: the ASTRA longitudinal plane
+
+```bash
+python make_initial_distribution.py --longitudinal astra --output initial_distribution_astra.npz
+```
+
+builds the same beam with the longitudinal shape of `S02_input_beam.astra` (σz 0.506 mm, σδ 0.506 %), centred on its own reference particle and applied around the 35.8055 MeV reference energy (the ASTRA reference is 35.31 MeV). With the smaller energy spread the projected emittances drop to 8.07 / 3.32 µm, with slices of 7.0 to 8.3 / 2.89 to 2.93 µm, and βy becomes 41.7 m. At the readout the rms size is the same, 3.2 × 25 mm, and the projected emittance is 25 % lower. It is not the default until we know which longitudinal plane CLARA had during the scan.
+
+## Model details and limits
+
+- The xsuite line tracks thick elements exactly, including off-momentum particles, and models the standing-wave cavities with Rosenzweig–Serafini focusing applied at each particle's energy. It reproduces Cheetah's 4×4 map to S07 within 5 × 10⁻⁵ and the reference energy exactly. The benchmark's scorer runs Cheetah with first-order magnets and achromatic cavities, so off-momentum particles behave differently there: with the cavities replaced by drifts, xsuite and Cheetah at second order agree within 2 %; with them, xsuite shows 45 to 55 % more chromatic emittance growth to S07.
+- There are no apertures in the xsuite line (the scorer adds 50 mm pipes at the screens) and no screen images; read beam positions from the coordinates.
+- `optics_along` does not use xsuite's twiss, which does not apply to an accelerating line. It tracks test particles and starts from the projected Twiss of the beam.
+- Coordinates are in Cheetah's convention: x and y in m, px and py canonical over the reference momentum, τ = −ζ in m, δ relative.
+
+Open points that can change this beam:
+
+1. The reconstruction file carries a placeholder pz (0.86 MeV/c); positions and angles are assumed right.
+2. `utils.beam_energy` converts the S02 currents at 32.8 MeV, the model has 35.8 MeV there; rescaling the S02 quadrupoles moves βy at S02-SCR-01 by about 40 %.
+3. The RF readbacks of the scan are not applied (they are machine phases). During the scan the 4HC linearizer was off and L04 ran at lower power, so the model's longitudinal plane is a stand-in.
+4. Whether the x–y correlation of the reconstruction (−0.48 at S07) is real.
