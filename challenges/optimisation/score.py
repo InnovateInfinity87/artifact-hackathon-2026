@@ -77,7 +77,7 @@ LATTICE_JSON = HERE / "data" / "clara" / "lattice_data" / "CLARA_cheetah.json"
 REFERENCE_TUNE_JSON = HERE / "data" / "clara" / "lattice_data" / "reference_tune.json"
 MAGNET_RANGES_JSON = HERE / "data" / "clara" / "lattice_data" / "magnet_ranges.json"
 
-LATTICE_START = "cla_s02_dia_scr_01"
+LATTICE_START = "cla_s02_sim_aper_01"
 
 # FEBE hutch screen, s = 67.93 m, just ahead of the IP. 
 READOUT_SCREEN = "cla_feh_dia_scr_01"
