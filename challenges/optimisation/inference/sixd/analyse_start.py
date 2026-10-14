@@ -11,8 +11,7 @@ def main() -> None:
     data = np.load(common.HERE / "observe_start.npz")
     jac, reference, labels, sigma0 = (data[k] for k in ("jac", "reference", "labels", "sigma0"))
     names = [str(label) for label in labels]
-    _config_of = np.repeat([n.split("|")[0] for n in names], 3)
-    _screen_of = np.repeat([n.split("|")[1] for n in names], 3)
+    config_of = np.repeat([n.split("|")[0] for n in names], 3)
     ref = reference.reshape(-1, 3)
     rms_x, rms_y = np.sqrt(ref[:, 0]), np.sqrt(np.maximum(ref[:, 1], 0))
     imageable_row = np.repeat((rms_x < 4e-3) & (rms_y < 4e-3), 3)
@@ -26,16 +25,17 @@ def main() -> None:
         return scaled[mask], int(mask.sum() // 3)
 
     s02 = ["s02a", "s02b", "s02c"]
-    s07 = ["s07x0.7_off", "s07x0.7_plus", "s07x0.7_minus"]
-    tdc_pm = ["nominal_plus", "nominal_minus"]
+    designed = sorted({c for c in config_of if c.endswith(("_off", "_plus", "_minus")) and c != "nominal_off"})
+    streak = [c for c in designed if not c.startswith("fea")]
+    spectrometer = [c for c in designed if c.startswith("fea")]
+    no_tdc = [c for c in designed if c.endswith("_off")]
     sets = {
-        "nominal, imageable screens (S02-S05)": subset(["nominal_off"], True),
-        "nominal, all 23 screens, TDC off": subset(["nominal_off"]),
-        "nominal, all screens, TDC off/+/-": subset(["nominal_off", *tdc_pm]),
-        "+ 3 S02 quad settings (imageable)": subset(["nominal_off", *tdc_pm, *s02]),
-        "+ S07 q01/q02 x0.7, TDC off/+/- (all)": subset(["nominal_off", *tdc_pm, *s02, *s07]),
-        "same, imageable screens only": subset(["nominal_off", *tdc_pm, *s02, *s07], True),
-        "nominal + S02 settings, imageable, no TDC": subset(["nominal_off", *s02], True),
+        "nominal, S02-S05 screens": subset(["nominal_off"], True),
+        "+ 3 S02 quad settings": subset(["nominal_off", *s02], True),
+        "+ designed S07 settings, TDC off": subset(["nominal_off", *s02, *no_tdc], True),
+        "+ streak screens, TDC off/+/-": subset(["nominal_off", *s02, *streak], True),
+        "+ spectrometer screen, TDC off/+/- (full plan)": subset(["nominal_off", *s02, *streak, *spectrometer], True),
+        "full plan without S02 quad settings": subset(["nominal_off", *streak, *spectrometer], True),
     }
     names21 = [obs.name_of(c) for c in range(21)]
     out = {}

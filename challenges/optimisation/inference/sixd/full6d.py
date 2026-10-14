@@ -21,7 +21,13 @@ TDC_ELEMENT = tdc.TDC_NAME
 FIELD_OF_VIEW_M = 5e-3  # half width of the YAG window
 PIXELS = 200  # at 50 um, as VirtualMachine.screen_image
 SCREEN_RESOLUTION_M = 20e-6
-TDC_VOLTAGE_V = 5e6  # assumed, see README
+# TDC voltage from the 23 March scan (CLA-TDC1-RF-CTRL-01 at 7.0 MW, phase 78 deg). No
+# calibration is in the repo, so V = sqrt(P R) with an assumed effective shunt impedance of
+# 5 MOhm (5 MV at 5 MW, the VELA/CLARA design figure). The phase is taken as the zero
+# crossing (pure streak); the absolute LLRF phase offset is a calibration constant.
+TDC_POWER_W = 7.0e6
+TDC_SHUNT_IMPEDANCE_OHM = 5e6  # assumed
+TDC_VOLTAGE_V = (TDC_POWER_W * TDC_SHUNT_IMPEDANCE_OHM) ** 0.5
 S02_Q_CURRENTS_A = {  # tomography/README.md section 6, S02 quad_01 / quad_02
     "s02a": (-11.3, 26.3),
     "s02b": (-8.4, 18.0),
@@ -123,3 +129,32 @@ def acquire_images(machine: cv.VirtualMachine, configs: list[Config], seed: int 
 
 def window_fraction(image: np.ndarray, particles: int) -> float:
     return float(image.sum() / particles)
+
+
+def load_design() -> dict:
+    """Designed per-screen settings (design_optics.py)."""
+    return common.read_json(common.HERE / "optics_design.json")
+
+
+def make_plan(line: cv.XsuiteLine, design: dict | None = None) -> list[Config]:
+    """Measurement plan of the image-based reconstruction:
+
+    - nominal optics, TDC off, every screen (screens from S06 on clip at the window edge;
+      the reconstruction uses the in-window part and the clipped fraction);
+    - three S02 quad_01/quad_02 settings, S02 to S05 screens, TDC off;
+    - for each designed screen after the TDC (design_optics.py), its own quadrupole
+      setting with the TDC off, +V and -V."""
+    design = load_design() if design is None else design
+    imageable = [s for s in line.inventory.screens if s.split("_")[1] in ("s02", "s03", "s04", "s05")]
+    configs = [Config("nominal_off", {}, 0.0, list(line.inventory.screens))]
+    for name, (q1, q2) in S02_Q_CURRENTS_A.items():
+        k1 = {
+            "cla_s02_mag_quad_01": line.quad_k1_from_current("cla_s02_mag_quad_01", q1),
+            "cla_s02_mag_quad_02": line.quad_k1_from_current("cla_s02_mag_quad_02", q2),
+        }
+        configs.append(Config(name, k1, 0.0, imageable))
+    for screen, entry in design.items():
+        short = screen.replace("cla_", "").replace("_dia", "").replace("_scr", "")
+        for sign, label in ((0, "off"), (+1, "plus"), (-1, "minus")):
+            configs.append(Config(f"{short}_{label}", entry["k1"], sign * TDC_VOLTAGE_V, [screen]))
+    return configs

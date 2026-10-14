@@ -19,8 +19,8 @@ PARTICLES = 100000
 def main() -> None:
     hidden = "--errors" in sys.argv
     t0 = time.time()
-    line = full6d.build_line()
     machine_line = full6d.build_line()
+    line = full6d.build_line()
     beam, _, _ = xsuite_model.load_distribution()
     rng = np.random.default_rng(0)
     beam = beam[rng.choice(len(beam), PARTICLES, replace=False)]
@@ -30,8 +30,7 @@ def main() -> None:
     machine = cv.VirtualMachine(machine_line, beam, errors, seed=1)
     for q, (dx, dy) in errors.quad_offsets.items():
         machine_line.line[q].shift_x, machine_line.line[q].shift_y = dx, dy
-    imageable = [s for s in line.inventory.screens if s.split("_")[1] in ("s02", "s03", "s04", "s05")]
-    configs = full6d.make_configs(line, imageable)
+    configs = full6d.make_plan(line)
     print("built", time.time() - t0, "screens", len(line.inventory.screens), flush=True)
     for c in configs:
         print(c.name, c.tdc_voltage_v, len(c.screens), flush=True)

@@ -24,8 +24,7 @@ def main() -> None:
     line = full6d.build_line()
     beam, _, _ = xsuite_model.load_distribution()
     sigma0 = np.cov(beam.T)
-    imageable = [s for s in line.inventory.screens if s.split("_")[1] in ("s02", "s03", "s04", "s05")]
-    configs = full6d.make_configs(line, imageable)
+    configs = full6d.make_plan(line)
     rng = np.random.default_rng(2)
     white = rng.normal(size=(PARTICLES, 6))
     white -= white.mean(0)

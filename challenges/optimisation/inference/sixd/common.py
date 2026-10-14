@@ -8,14 +8,33 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import xtrack as xt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "nominal_model"))
 import tdc
 import xsuite_model
 
 import clara_virtual as cv
 
 HERE = Path(__file__).resolve().parent
+
+# Share compiled tracking kernels between lines with the same element classes, so that a
+# process compiles each kernel once instead of once per line (each compile takes minutes).
+_SHARED_KERNELS: dict[tuple, dict] = {}
+_build_tracker = xt.Line.build_tracker
+
+
+def _build_tracker_shared(self, *args, **kwargs):
+    key = tuple(sorted({type(e).__name__ for e in self.element_dict.values()}))
+    if "track_kernel" not in kwargs and _SHARED_KERNELS.get(key):
+        kwargs["track_kernel"] = _SHARED_KERNELS[key]
+    out = _build_tracker(self, *args, **kwargs)
+    _SHARED_KERNELS[key] = self.tracker.track_kernel
+    return out
+
+
+xt.Line.build_tracker = _build_tracker_shared
 RECONSTRUCTION_POINT = xsuite_model.RECONSTRUCTION_POINT
 LAST_ELEMENT = "cla_fea_dia_scr_04"
 LABELS = ("x", "px", "y", "py", "tau", "delta")
