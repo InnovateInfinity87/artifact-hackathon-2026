@@ -58,3 +58,13 @@ Next steps:
 4. Add a section to `sixd/README.md` with the recipe (knob values and currents) and figures.
 
 Plotting conventions: matplotlib default colour cycle, inferno for colormaps, small figures (about 4 x 2.5 in, up to 8 in wide when rectangular). No em dashes in any text.
+
+## Update from the cloud session (14 October, evening)
+
+Branch `claude/project-thread-vjmyln` (cut from `overfit-proud/inference-wip`). The 6D reconstruction at S02 now runs end to end; results and recipe are in `sixd/README.md`, section "6D reconstruction at the S02 start from images".
+
+- TDC at 5.92 MV (7.0 MW, assumed 5 MOhm). Designed S07/FEA quad settings in `sixd/optics_design.json`.
+- Recovered: sigma_x, sigma_y (2 %), sigma_z (+8 %), sigma_delta (-7 %), core emittances (within 20 %), x-y coupling.
+- Not recovered: chirp sign (two minima), slice energy spread and eps_z. rms eps_x is set by a 1 % halo outside the screens.
+- Environment: set `XSUITE_ALLOW_KERNEL_COMPILATION=1` without the `xsuite` package. `common.py` shares compiled kernels between lines in a process (the first build costs 3 to 5 min).
+- Fixed: `analyse_start.py` (undefined `config_of` after the lint change), `common.py` import path for `xsuite_model`.

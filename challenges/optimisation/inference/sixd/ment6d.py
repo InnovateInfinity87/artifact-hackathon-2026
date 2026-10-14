@@ -424,7 +424,7 @@ def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=20
         if truth_summary is not None:
             now = stages[-1]["summary"]
             log("   ratios " + " ".join(f"{k} {now[k] / truth_summary[k]:.3f}" for k in
-                ("eps_x", "eps_y", "eps_z", "sigma_z", "sigma_delta", "chirp")))
+                ("eps_x", "eps_y", "eps_z", "core_eps_x", "core_eps_y", "core_eps_z", "sigma_z", "sigma_delta", "chirp")))
     if refine_longitudinal:
         refined, res = longitudinal_fit(line, cfgs, keys_used, data, n_meas, sample, w,
                                         workers=workers, log=log)
@@ -439,7 +439,7 @@ def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=20
             if truth_summary is not None:
                 now = stages[-1]["summary"]
                 log("   ratios " + " ".join(f"{k} {now[k] / truth_summary[k]:.3f}" for k in
-                    ("eps_x", "eps_y", "eps_z", "sigma_z", "sigma_delta", "chirp")))
+                    ("eps_x", "eps_y", "eps_z", "core_eps_x", "core_eps_y", "core_eps_z", "sigma_z", "sigma_delta", "chirp")))
     return {"sample": sample, "weights": w, "indices": indices, "data": data,
             "stages": stages, "keys_used": keys_used}
     # (truth_summary is for monitoring only; it never enters the fit)
@@ -494,9 +494,60 @@ def longitudinal_fit(line, cfgs, keys_used, data, n_meas, sample, w, n_fit=40_00
 
     p0 = np.array([m0, c0 * st, 0.0, s0]) / scale
     res = minimize(f, p0, method="Nelder-Mead",
-                   options={"maxfev": 45, "xatol": 0.05, "fatol": 1e-3,
+                   options={"maxfev": 80, "xatol": 0.05, "fatol": 1e-3,
                             "initial_simplex": [p0 + d for d in (np.zeros(4), *np.eye(4) * 2.0)]})
     return build(res.x), res
+
+
+def resample_stages(line, cfgs, keys_used, data, n_meas, sample, w, stages=6, n_sample=150_000,
+                    bandwidth=0.28, sweeps=15, seed=21, workers=4, log=print, truth_summary=None):
+    """Particle refinement after the Gaussian stages: draw the next sample from the current
+    weighted sample with a Gaussian kernel (bandwidth x the weighted covariance), and run
+    MENT relative to that proposal. A Gaussian proposal spreads the particles over a 6D
+    ellipsoid of which this curved, strongly correlated beam fills a small part, and MENT
+    stalls when the sample has no particles where the images need charge; resampling puts
+    the particles where the charge is."""
+    rng = np.random.default_rng(seed)
+    history = []
+    for stage in range(stages):
+        cov, _ = weighted_cov(sample, w)
+        parents = sample[rng.choice(len(sample), n_sample, p=w)]
+        sample = parents + rng.multivariate_normal(np.zeros(6), bandwidth**2 * cov, n_sample, method="eigh")
+        indices = track_all(line, sample, cfgs, seed=seed + 100 * stage, workers=workers)
+        w, hist = ment(indices, data, keys_used, sweeps=sweeps, n_meas=n_meas)
+        history.append(hist)
+        log(f"resample stage {stage}: chi2/pixel {hist[-1][1]:.3f} ESS {hist[-1][2]:.0f}")
+        if truth_summary is not None:
+            now = summary(sample, w)
+            log("   ratios " + " ".join(f"{k} {now[k] / truth_summary[k]:.3f}" for k in
+                ("core_eps_x", "core_eps_y", "core_eps_z", "sigma_z", "sigma_delta", "chirp", "corr_x_y")))
+    return sample, w, indices, history
+
+
+def chirp_scan(line, cfgs, keys_used, data, n_meas, sample, w, chirps=(-10, -5, 0, 5, 10, 14, 18, 22),
+               slices=(1.5e-3, 4e-3), n_fit=40_000, seed=3, workers=4, log=print):
+    """Global search of the S02 energy chirp: resample the current result, set
+    delta = <delta> + c (tau - <tau>) + s xi and score every (c, s) of a grid by the image
+    chi2. The chi2 has a second, shallower minimum at negative chirp, so a local search from
+    a poor start can end there; with a good transverse beam the true chirp is a clear
+    minimum. Returns the best sample (n_fit particles) and the grid."""
+    rng = np.random.default_rng(seed)
+    base = sample[rng.choice(len(sample), n_fit, p=w)]
+    xi = rng.normal(size=n_fit)
+    t = base[:, 4] - base[:, 4].mean()
+    m = base[:, 5].mean()
+    grid, best = [], None
+    for c in chirps:
+        for sl in slices:
+            trial = base.copy()
+            trial[:, 5] = m + c * t + sl * xi
+            idx = track_all(line, trial, cfgs, seed=seed, workers=workers)
+            value = image_chi2(idx, data, keys_used, n_meas, n_fit)
+            grid.append((c, sl, value))
+            log(f"   chirp {c:6.1f} slice {sl:.4f} chi2 {value:.4f}")
+            if best is None or value < best[0]:
+                best = (value, trial)
+    return best[1], grid
 
 
 def main() -> None:
