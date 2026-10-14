@@ -56,9 +56,10 @@ def measured_fractions(image: np.ndarray, n_particles: int) -> np.ndarray:
     return np.append(coarse, max(n_particles - coarse.sum(), 0.0)) / n_particles
 
 
-def image_moments(image: np.ndarray) -> tuple[np.ndarray, float]:
-    """Centroid-removed second moments (xx, yy, xy) of a full-resolution image, resolution
-    removed, and the fraction of the image within 1 pixel of the edge (clipping flag)."""
+def image_moments(image: np.ndarray, n_particles: float | None = None) -> tuple[np.ndarray, float]:
+    """Centroid-removed second moments (xx, yy, xy) of a full-resolution image (only the
+    part inside the window: truncated moments), resolution removed, and the fraction of the
+    bunch inside the window (1 if n_particles is None)."""
     centres = (np.arange(full6d.PIXELS) + 0.5) * (2 * full6d.FIELD_OF_VIEW_M / full6d.PIXELS) - full6d.FIELD_OF_VIEW_M
     total = image.sum()
     py, px = image.sum(1) / total, image.sum(0) / total
@@ -66,8 +67,8 @@ def image_moments(image: np.ndarray) -> tuple[np.ndarray, float]:
     xx = px @ (centres - mx) ** 2 - full6d.SCREEN_RESOLUTION_M**2
     yy = py @ (centres - my) ** 2 - full6d.SCREEN_RESOLUTION_M**2
     xy = ((centres - my)[:, None] * (centres - mx)[None, :] * image).sum() / total
-    edge = (image[[0, -1], :].sum() + image[:, [0, -1]].sum()) / total
-    return np.array([xx, yy, xy]), edge
+    inside = 1.0 if n_particles is None else total / n_particles
+    return np.array([xx, yy, xy]), inside
 
 
 # ---------------------------------------------------------------------------- tracking
@@ -124,16 +125,18 @@ def track_all(line, sample, configs, seed=0, workers=4):
 
 
 # ---------------------------------------------------------------------------- prior
-def linear_gaussian_fit(line, configs, keys, images, max_edge=0.01):
+def linear_gaussian_fit(line, configs, keys, images, n_meas, min_inside=0.995, transverse_only=False):
     """Weighted least squares for the 21 covariance elements from the moments of images that
-    are not clipped, with the model's linear maps; projected to positive definite."""
+    are not clipped, with the model's linear maps; projected to positive definite. With
+    `transverse_only`, only the 10 transverse elements from the S02 screens (no cavity
+    before them, so the linear map is exact apart from chromatic terms)."""
     import observability as obs
 
     by_name = {c.name: c for c in configs}
     rows, values, sig = [], [], []
     for (name, screen), image in zip(keys, images):
-        moments, edge = image_moments(image)
-        if edge > max_edge:
+        moments, inside = image_moments(image, n_meas)
+        if inside < min_inside or (transverse_only and "_s02_" not in screen):
             continue
         config = by_name[name]
         full6d.apply_config(line, config)
@@ -144,6 +147,8 @@ def linear_gaussian_fit(line, configs, keys, images, max_edge=0.01):
     line.restore_nominal_quads()
     full6d.set_tdc_voltage(line, 0.0)
     a = np.vstack(rows)
+    if transverse_only:
+        a = a * np.array([i < 4 and j < 4 for i, j in common.PAIR_INDEX])
     b = np.concatenate(values)
     s = np.concatenate(sig)
     a, b = a / s[:, None], b / s
@@ -151,8 +156,114 @@ def linear_gaussian_fit(line, configs, keys, images, max_edge=0.01):
     scale = np.linalg.norm(a, axis=0)
     scale[scale == 0] = 1
     solution, *_ = np.linalg.lstsq(a / scale, b, rcond=1e-10)
+    if transverse_only:
+        solution[[c for c, (i, j) in enumerate(common.PAIR_INDEX) if not (i < 4 and j < 4)]] = 0
     sigma = common.unique_to_matrix(solution / scale)
+    if transverse_only:
+        out = np.zeros((6, 6))
+        out[:4, :4] = nearest_positive(sigma[:4, :4])
+        return out, len(values)
     return nearest_positive(sigma), len(values)
+
+
+_WHITE = None
+
+
+def _moments_job(args):
+    """Second moments (xx, yy, xy) at the screens of one config for a Gaussian with
+    covariance sigma, from the fixed whitened sample."""
+    config, sigma = args
+    line = _LINE
+    full6d.apply_config(line, config)
+    sample = _WHITE @ sqrt_psd(sigma).T
+    tracked = line.track_through(sample, config.screens, allow_losses=True)
+    out = {}
+    rng = np.random.default_rng(11)
+    half = full6d.FIELD_OF_VIEW_M
+    for screen, c in tracked.items():
+        x = c[:, 0] + rng.normal(0, full6d.SCREEN_RESOLUTION_M, len(c))
+        y = c[:, 2] + rng.normal(0, full6d.SCREEN_RESOLUTION_M, len(c))
+        keep = (np.abs(x) < half) & (np.abs(y) < half)
+        x, y = x[keep], y[keep]
+        if len(x) < 10:
+            out[screen] = np.array([0.0, 0.0, 0.0, 0.0])
+            continue
+        res2 = full6d.SCREEN_RESOLUTION_M**2
+        out[screen] = np.array([x.var() - res2, y.var() - res2,
+                                np.mean((x - x.mean()) * (y - y.mean())), keep.sum() / len(_WHITE)])
+    line.restore_nominal_quads()
+    full6d.set_tdc_voltage(line, 0.0)
+    return config.name, out
+
+
+def sqrt_psd(sigma):
+    values, vectors = np.linalg.eigh(sigma)
+    return (vectors * np.sqrt(np.maximum(values, 0.0))) @ vectors.T
+
+
+def gaussian_fit(line, configs, keys, images, n_meas, start, particles=3000,
+                 iterations=8, workers=4, seed=5, log=print):
+    """Nonlinear Gaussian fit of the 21 covariance elements to the second moments of the
+    unclipped images, tracking a fixed whitened sample through the xsuite line (chromatic
+    effects, cavities and the TDC included). Sigma = D L L^T D with D the start rms sizes.
+    Levenberg-Marquardt with finite-difference Jacobians evaluated in parallel."""
+    from scipy.optimize import least_squares
+
+    global _LINE, _WHITE
+    _LINE = line
+    rng = np.random.default_rng(seed)
+    white = rng.normal(size=(particles, 6))
+    white -= white.mean(0)
+    _WHITE = white @ np.linalg.inv(np.linalg.cholesky(np.cov(white.T))).T
+    by_name = {c.name: c for c in configs}
+    targets = {}
+    for key, image in zip(keys, images):
+        moments, inside = image_moments(image, n_meas)
+        if inside > 0.05:
+            targets[key] = np.append(moments, inside)
+    names = sorted({k[0] for k in targets})
+    cfgs = [by_name[n] for n in names]
+    keys_fit = sorted(targets)
+    meas = np.concatenate([targets[k] for k in keys_fit])
+    scale = np.concatenate([[targets[k][0], targets[k][1], np.sqrt(targets[k][0] * targets[k][1]), 0.5]
+                            for k in keys_fit])
+    noise = 0.02 * scale  # 2 % on the moments, 1 % absolute on the inside fraction
+    d = np.sqrt(np.diag(start))
+    tril = np.tril_indices(6)
+    l0 = np.linalg.cholesky(start / np.outer(d, d) + 1e-9 * np.eye(6))
+    pool = mp.get_context("fork").Pool(workers)
+
+    def sigma_of(p):
+        lmat = np.zeros((6, 6))
+        lmat[tril] = p
+        return (lmat @ lmat.T) * np.outer(d, d)
+
+    def predict_many(params):
+        jobs = [(c, sigma_of(p)) for p in params for c in cfgs]
+        results = pool.map(_moments_job, jobs)
+        out = []
+        for i in range(len(params)):
+            chunk = dict(results[i * len(cfgs):(i + 1) * len(cfgs)])
+            out.append(np.concatenate([chunk[c][s] for c, s in keys_fit]))
+        return out
+
+    def residual(p):
+        return (predict_many([p])[0] - meas) / noise
+
+    def jacobian(p):
+        step = 1e-4
+        params = [p] + [p + step * np.eye(len(p))[i] for i in range(len(p))]
+        preds = predict_many(params)
+        return np.column_stack([(preds[i + 1] - preds[0]) / noise / step for i in range(len(p))])
+
+    try:
+        result = least_squares(residual, l0[tril], jac=jacobian, method="lm", max_nfev=iterations)
+    finally:
+        pool.close()
+    sigma = sigma_of(result.x)
+    log(f"Gaussian fit on {len(keys_fit)} images (truncated moments): cost {result.cost:.3g}, "
+        f"chi2/dof {2 * result.cost / max(len(meas) - 21, 1):.2f}, nfev {result.nfev}")
+    return sigma, len(keys_fit)
 
 
 def nearest_positive(sigma: np.ndarray, floor: float = 1e-6) -> np.ndarray:
@@ -251,24 +362,52 @@ def summary(sample, w=None) -> dict:
         "corr_y_tau": float(corr[2, 4]),
         "slice_eps_x": float(np.sqrt(np.linalg.det(sc[0:2, 0:2]))),
         "slice_eps_y": float(np.sqrt(np.linalg.det(sc[2:4, 2:4]))),
+        **{f"core_eps_{p}": trimmed_emittance(sample, w, i) for p, i in (("x", 0), ("y", 2), ("z", 4))},
         "cov": s.tolist(),
     }
 
 
+CORE_FRACTION = 0.95
+
+
+def trimmed_emittance(sample, w, i, fraction=CORE_FRACTION):
+    """rms emittance of plane (i, i+1) after dropping the outer 1 - fraction of the charge
+    (by Mahalanobis distance in that plane). The rms emittance of this beam is set by a
+    ~1 % halo that lands outside the +-5 mm screens on most images, so the core value is the
+    one images can measure."""
+    u = sample[:, i : i + 2]
+    s2, mean = weighted_cov(u, w)
+    d = u - mean
+    m = np.einsum("ij,jk,ik->i", d, np.linalg.inv(s2), d)
+    order = np.argsort(m)
+    cum = np.cumsum(w[order])
+    keep = np.zeros(len(w), bool)
+    keep[order[: np.searchsorted(cum, fraction * cum[-1]) + 1]] = True
+    wk = w * keep
+    wk = wk / wk.sum()
+    sk, _ = weighted_cov(u, wk)
+    return float(np.sqrt(np.linalg.det(sk)))
+
+
 # ---------------------------------------------------------------------------- pipeline
-def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=300_000,
-                inflation=(2.0, 1.4, 1.2), sweeps=(15, 20, 30), seed=0, log=print,
-                workers=4):
+# Broad, uncorrelated starting prior (rms of x, px, y, py, tau, delta). It only has to
+# cover the beam; it is set from the order of magnitude of the S02 screen sizes, not from
+# the true beam. A Gaussian fit to the image moments was tried as a start and fails: the
+# beam has tails outside the +-5 mm window on most screens, which bias the moments.
+BROAD_PRIOR_RMS = np.array([3e-3, 1.5e-3, 3e-3, 1.5e-3, 2e-3, 3e-2])
+
+
+def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=200_000,
+                inflation=(1.0, 1.3, 1.15, 1.1, 1.1), sweeps=(8, 8, 10, 10, 15), seed=0,
+                log=print, workers=4, truth_summary=None, refine_longitudinal=True,
+                final_inflation=(1.15, 1.1), final_sweeps=(15, 30)):
+    """Adaptive MENT: stage 0 uses the broad prior; every later stage redraws the sample
+    from a Gaussian fitted to the previous weighted sample, inflated by `inflation`."""
     keys_used = keys if keys_used is None else keys_used
     data = {k: measured_fractions(img, n_meas) for k, img in zip(keys, images)}
-    used_set = set(keys_used)
-    used_images = [(k, img) for k, img in zip(keys, images) if k in used_set]
     names_used = {k[0] for k in keys_used}
     cfgs = [c for c in configs if c.name in names_used]
-    sigma, n_fit = linear_gaussian_fit(
-        line, cfgs, [k for k, _ in used_images], [img for _, img in used_images]
-    )
-    log(f"linear Gaussian fit from {n_fit} unclipped images: sd {np.sqrt(np.diag(sigma))}")
+    sigma = np.diag(BROAD_PRIOR_RMS**2)
     rng = np.random.default_rng(seed)
     mean = np.zeros(6)
     stages = []
@@ -281,8 +420,83 @@ def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=30
         w, history = ment(indices, data, keys_used, sweeps=n_sweeps, n_meas=n_meas, log=log)
         sigma, mean = weighted_cov(sample, w)
         stages.append({"factor": factor, "history": history, "summary": summary(sample, w)})
+        log(f"   sd {np.sqrt(np.diag(sigma))}")
+        if truth_summary is not None:
+            now = stages[-1]["summary"]
+            log("   ratios " + " ".join(f"{k} {now[k] / truth_summary[k]:.3f}" for k in
+                ("eps_x", "eps_y", "eps_z", "sigma_z", "sigma_delta", "chirp")))
+    if refine_longitudinal:
+        refined, res = longitudinal_fit(line, cfgs, keys_used, data, n_meas, sample, w,
+                                        workers=workers, log=log)
+        sigma, mean = np.cov(refined.T), refined.mean(0)
+        for stage, (factor, n_sweeps) in enumerate(zip(final_inflation, final_sweeps), len(stages)):
+            sample = draw_gaussian(sigma * factor**2, n_sample, rng, mean)
+            indices = track_all(line, sample, cfgs, seed=seed + 100 * stage, workers=workers)
+            w, history = ment(indices, data, keys_used, sweeps=n_sweeps, n_meas=n_meas, log=log)
+            stages.append({"factor": factor, "history": history, "summary": summary(sample, w),
+                           "longitudinal": True})
+            sigma, mean = weighted_cov(sample, w)
+            if truth_summary is not None:
+                now = stages[-1]["summary"]
+                log("   ratios " + " ".join(f"{k} {now[k] / truth_summary[k]:.3f}" for k in
+                    ("eps_x", "eps_y", "eps_z", "sigma_z", "sigma_delta", "chirp")))
     return {"sample": sample, "weights": w, "indices": indices, "data": data,
             "stages": stages, "keys_used": keys_used}
+    # (truth_summary is for monitoring only; it never enters the fit)
+
+
+def image_chi2(indices, data, keys_used, n_meas, n_sample):
+    """Pixel chi2 per used pixel of an unweighted sample against the images."""
+    w = np.full(n_sample, 1.0 / n_sample)
+    chi, used_total = 0.0, 0
+    for key in keys_used:
+        sim = predicted(indices, w, key)
+        meas = data[key]
+        var = meas / n_meas + sim / n_sample + 1e-12
+        used = (meas > 0) | (sim > 0)
+        chi += float((((meas - sim) ** 2) / var)[used].sum())
+        used_total += int(used.sum())
+    return chi / max(used_total, 1)
+
+
+def longitudinal_fit(line, cfgs, keys_used, data, n_meas, sample, w, n_fit=40_000, seed=3,
+                     workers=4, log=print):
+    """Refine the energy coordinate: resample the MENT result, keep x, px, y, py, tau and
+    replace delta by m + c t + q t^2 + s xi (t = tau - <tau>, xi standard normal), with
+    (m, c, q, s) fitted to the images by Nelder-Mead on the pixel chi2. MENT alone builds the
+    tau-delta correlation very slowly, because it enters every image only indirectly
+    (chromatic effects, the dispersion of the FEA dogleg)."""
+    from scipy.optimize import minimize
+
+    rng = np.random.default_rng(seed)
+    base = sample[rng.choice(len(sample), n_fit, p=w)]
+    xi = rng.normal(size=n_fit)
+    t = base[:, 4] - base[:, 4].mean()
+    cov = np.cov(t, base[:, 5])
+    c0 = cov[0, 1] / cov[0, 0]
+    s0 = np.sqrt(max(cov[1, 1] - c0 * cov[0, 1], 1e-8))
+    m0 = base[:, 5].mean()
+    st = t.std()
+    scale = np.array([1e-3, 10.0 * st, 1e-3, 1e-3])  # parameters in units of ~1e-3 in delta
+
+    def build(p):
+        m, c, q, sl = p * scale
+        trial = base.copy()
+        trial[:, 5] = m + c * t / st + q * (t / st) ** 2 + abs(sl) * xi
+        return trial
+
+    def f(p):
+        trial = build(p)
+        indices = track_all(line, trial, cfgs, seed=seed, workers=workers)
+        value = image_chi2(indices, data, keys_used, n_meas, n_fit)
+        log(f"   longitudinal {np.round(p * scale, 6)} chi2 {value:.4f}")
+        return value
+
+    p0 = np.array([m0, c0 * st, 0.0, s0]) / scale
+    res = minimize(f, p0, method="Nelder-Mead",
+                   options={"maxfev": 45, "xatol": 0.05, "fatol": 1e-3,
+                            "initial_simplex": [p0 + d for d in (np.zeros(4), *np.eye(4) * 2.0)]})
+    return build(res.x), res
 
 
 def main() -> None:
