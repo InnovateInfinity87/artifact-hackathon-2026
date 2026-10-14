@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import cheetah
 import h5py
@@ -120,7 +120,7 @@ def main() -> None:
         transverse_source=f"{RECONSTRUCTION_FILE.name}, {arguments.particles} particles (seed {SUBSAMPLE_SEED})",
         longitudinal_source=arguments.longitudinal,
         magnet_settings_for_backtracking=model.GPSR_LATTICE_JSON.name,
-        built=datetime.now(timezone.utc).date().isoformat(),
+        built=datetime.now(UTC).date().isoformat(),
     )
     summary = model.beam_summary(start, energy_ev)
     print(

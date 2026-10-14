@@ -53,7 +53,9 @@ The transverse plane comes from measurement: the GPSR reconstruction at `CLA-S07
 
 The projected emittances are larger than in any single energy slice because each slice has its own orientation in phase space, which the chromatic transport to S07 lines back up; each slice carries the measured emittance. A beam without these energy-dependent correlations, given the same 0.93 % energy spread, would reach S07 39 % above the measured vertical emittance and 7 % above the horizontal one. The real energy spread during the scan therefore matters, and it is not known yet.
 
-This beam is far from the one in `score.sample_beam`: its horizontal emittance is 3.4 times larger and its x–y coupling is absent there.
+This beam is far from the one in `score.sample_beam`: its normalised emittances are 3.6 (x) and 1.7 (y) times larger, and its x–y coupling is absent there.
+
+The beam is also off axis by +0.22 mm and +0.04 mrad in y at the start (−0.04 mm in x), carried over from the reconstruction's small offset at S07 (+0.07 mm). With the lattice-file strengths this becomes −3.8 mm in y at the readout. Subtract the centroid if you need a beam on axis.
 
 ## The nominal magnet strengths
 
@@ -67,11 +69,11 @@ The starting beam was built through the scan settings because those produced the
 python make_initial_distribution.py --longitudinal astra --output initial_distribution_astra.npz
 ```
 
-builds the same beam with the longitudinal shape of `S02_input_beam.astra` (σz 0.506 mm, σδ 0.506 %), centred on its own reference particle and applied around the 35.8055 MeV reference energy (the ASTRA reference is 35.31 MeV). With the smaller energy spread the projected emittances drop to 8.07 / 3.32 µm, with slices of 7.0 to 8.3 / 2.89 to 2.93 µm, and βy becomes 41.7 m. At the readout the rms size is the same, 3.2 × 25 mm, and the projected emittance is 25 % lower. It is not the default until we know which longitudinal plane CLARA had during the scan.
+builds the same beam with the longitudinal shape of `S02_input_beam.astra` (σz 0.506 mm, σδ 0.506 %), centred on its own reference particle and applied around the 35.8055 MeV reference energy (the ASTRA reference is 35.31 MeV). With the smaller energy spread the projected emittances drop to 8.07 / 3.32 µm, with slices of 7.0 to 8.3 / 2.89 to 2.93 µm, and βy becomes 41.7 m. At the readout the rms size is the same, 3.1 × 25 mm, and the projected emittance is 25 % lower. It is not the default until we know which longitudinal plane CLARA had during the scan.
 
 ## Model details and limits
 
-- The xsuite line tracks thick elements exactly, including off-momentum particles, and models the standing-wave cavities with Rosenzweig–Serafini focusing applied at each particle's energy. It reproduces Cheetah's 4×4 map to S07 within 5 × 10⁻⁵ and the reference energy exactly. The benchmark's scorer runs Cheetah with first-order magnets and achromatic cavities, so off-momentum particles behave differently there: with the cavities replaced by drifts, xsuite and Cheetah at second order agree within 2 %; with them, xsuite shows 45 to 55 % more chromatic emittance growth to S07.
+- The xsuite line tracks thick elements with each particle's own momentum (xsuite's default paraxial maps), and models the standing-wave cavities with Rosenzweig–Serafini focusing applied at each particle's energy. It reproduces Cheetah's 4×4 map within 1 × 10⁻⁴ to S07 and 5 × 10⁻⁴ to the readout, and Cheetah's reference energy exactly (the on-axis particle ends 2 × 10⁻⁵ below it, an effect of the cavity slicing). The benchmark's scorer runs Cheetah with first-order magnets and achromatic cavities, so off-momentum particles behave differently there: with the cavities replaced by drifts, xsuite and Cheetah at second order agree within 2 %; with them, xsuite shows 45 to 55 % more chromatic emittance growth to S07.
 - There are no apertures in the xsuite line (the scorer adds 50 mm pipes at the screens) and no screen images; read beam positions from the coordinates.
 - `optics_along` does not use xsuite's twiss, which does not apply to an accelerating line. It tracks test particles and starts from the projected Twiss of the beam.
 - Coordinates are in Cheetah's convention: x and y in m, px and py canonical over the reference momentum, τ = −ζ in m, δ relative.

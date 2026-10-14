@@ -25,7 +25,8 @@ xsuite's native twiss does not apply to this accelerating line, so `optics_along
 computes Twiss and dispersion from tracked test particles.
 
 Ported from the validation work behind this folder: the conversion reproduces Cheetah's
-4x4 map to CLA-S07-SIM-APER-01 within 5e-5 and the reference energy exactly.
+4x4 map within 1e-4 to CLA-S07-SIM-APER-01 and 5e-4 to the readout, and the reference energy
+exactly.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ RECONSTRUCTION_POINT = (
 )
 
 ELECTRON_REST_ENERGY_EV = xt.ELECTRON_MASS_EV
-CAVITY_SLICES = 160  # per cavity; 5e-5 agreement with Cheetah to S07
+CAVITY_SLICES = 160  # per cavity; 1e-4 agreement with Cheetah to S07
 TEST_AMPLITUDE = 1e-6  # m, rad or relative: small enough to stay linear
 COORDINATES = ("x", "px", "y", "py", "zeta", "delta")
 
