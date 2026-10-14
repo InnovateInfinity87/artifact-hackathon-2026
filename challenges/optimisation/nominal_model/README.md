@@ -40,7 +40,7 @@ optics = model.optics_along(converted, model.twiss_from_coordinates(start))
 
 ## The starting beam
 
-The transverse plane comes from measurement: the GPSR reconstruction at `CLA-S07-SIM-APER-01` (`data/clara/lattice_data/CLA-S07-SIM-APER-01.hdf`), made from the scan of S07-QUAD-05 on 23 March 2026. The longitudinal plane comes from the model: `score.sample_beam` at severity 0 is injected at the start and tracked forward to S07, and its (τ, δ) are attached there to the reconstructed particles at random. The 6D beam is then tracked back to the start in xsuite through the magnet settings that were on the machine during the scan (`CLARA_cheetah_S07_GPSR.json`). Tracking it forward again returns the reconstruction to 7 × 10⁻¹³ of its rms.
+The transverse plane comes from measurement: the GPSR reconstruction at `CLA-S07-SIM-APER-01` (`data/clara/lattice_data/CLA-S07-SIM-APER-01.hdf`), made from the scan of S07-QUAD-05 on 23 March 2026. The longitudinal plane comes from the model: `score.sample_beam` at severity 0 is injected at the start and tracked forward to S07, and its (τ, δ) are attached there to the reconstructed particles at random. The 6D beam is then tracked back to the start in xsuite through the magnet settings that were on the machine during the scan (`CLARA_cheetah_S07_GPSR.json`). Tracking it forward again returns the reconstruction to 7 × 10⁻¹³ of its rms. Finally the beam is centred (see below).
 
 | At `cla_s02_sim_aper_01` | x | y |
 |---|---|---|
@@ -55,7 +55,7 @@ The projected emittances are larger than in any single energy slice because each
 
 This beam is far from the one in `score.sample_beam`: its normalised emittances are 3.6 (x) and 1.7 (y) times larger, and its x–y coupling is absent there.
 
-The beam is also off axis by +0.22 mm and +0.04 mrad in y at the start (−0.04 mm in x), carried over from the reconstruction's small offset at S07 (+0.07 mm). With the lattice-file strengths this becomes −3.8 mm in y at the readout. Subtract the centroid if you need a beam on axis.
+The beam is centred at the start in x, x′, y and y′, so errors (offsets, jitter, misalignments) can be added on top of an on-axis beam. The backtracked beam was off axis by +0.22 mm and +0.04 mrad in y (−0.04 mm and −0.02 mrad in x), from the reconstruction's small offset at S07; that offset is removed after the closure check and stored in the file's metadata (`removed_offset_x_px_y_py`). With the lattice-file strengths the centred beam arrives at the readout within 0.1 mm of the axis; the remainder comes from chromatic effects.
 
 ## The nominal magnet strengths
 

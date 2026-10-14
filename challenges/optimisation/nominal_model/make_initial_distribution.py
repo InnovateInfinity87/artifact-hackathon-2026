@@ -13,6 +13,8 @@
    applied around bench-nominal's reference energy.
 3. The 6D beam is tracked back to the start in xsuite through the same settings and saved.
 4. Closure: tracking the result forward again must return the reconstruction.
+5. The beam is centred at the start in x, px, y and py, so errors can be added on top of
+   an on-axis beam; the removed offset is stored in the metadata.
 
 Run: python make_initial_distribution.py [--longitudinal astra] [--output FILE]
 """
@@ -110,6 +112,8 @@ def main() -> None:
     print(
         f"closure: largest particle difference at {model.RECONSTRUCTION_POINT} is {worst:.1e} rms"
     )
+    removed_offset = start[:, :4].mean(axis=0)
+    start[:, :4] -= removed_offset
 
     model.save_distribution(
         arguments.output,
@@ -120,6 +124,7 @@ def main() -> None:
         transverse_source=f"{RECONSTRUCTION_FILE.name}, {arguments.particles} particles (seed {SUBSAMPLE_SEED})",
         longitudinal_source=arguments.longitudinal,
         magnet_settings_for_backtracking=model.GPSR_LATTICE_JSON.name,
+        removed_offset_x_px_y_py=" ".join(f"{value:.6e}" for value in removed_offset),
         built=datetime.now(UTC).date().isoformat(),
     )
     summary = model.beam_summary(start, energy_ev)
