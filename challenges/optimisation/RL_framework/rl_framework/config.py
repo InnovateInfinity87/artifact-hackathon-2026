@@ -31,3 +31,60 @@ class RLConfig:
 
     # Episode length before truncation
     max_episode_steps: int = 100
+
+    # ---------------- nominal xsuite model (SimEnv only) ---------------- #
+    # Everything below describes the model in `nominal_model/`, which SimEnv tracks
+    # through. `lattice_path`, `beam` and `magnet_config` above are for RealEnv.
+
+    # Which model tracks the beam. "cheetah" is first-order magnets and achromatic
+    # cavities, the physics `score.py` is scored on, and starts in a second;
+    # "xsuite" is thick elements and cavities that focus at each particle's own
+    # energy, closer to the machine off momentum, and spends a minute compiling a
+    # tracking kernel. Same lattice, same beam, same interface either way.
+    backend: str = "cheetah"
+
+    # Where `xsuite_model.py` lives, and what it is given. None takes the defaults
+    # of the nominal model: the challenge lattice file and its starting beam.
+    nominal_model_dir: str | None = None
+    nominal_lattice_json: str | None = None
+    distribution_path: str | None = None
+
+    # The stretch of machine that is modelled. The default is the benchmark's:
+    # the start of S02 to the FEBE hutch screen scored by `score.py`.
+    lattice_start: str = "cla_s02_sim_aper_01"
+    lattice_end: str = "cla_feh_dia_scr_01"
+
+    # Particles tracked per step, taken from the front of the 200,000 in the
+    # distribution file. None uses all of them (slow).
+    num_particles: int | None = 10_000
+
+    # Screen images are binned onto this (rows, columns) grid, covering the whole
+    # chip whatever its native resolution is. `env.screen_extent(name)` gives the
+    # physical size the grid spans.
+    screen_shape: tuple[int, int] = (128, 128)
+    # Divide each image by its brightest pixel, so observations are in [0, 1].
+    normalise_image: bool = True
+
+    # Beam pipe the particles have to stay inside; a particle that leaves it stops
+    # counting towards every reading further down the line. None removes the pipe.
+    beam_pipe_radius: float | None = 50e-3
+    # Fraction of the launched beam a diagnostic needs for its reading to count.
+    min_screen_fraction: float = 0.10
+    # Gaussian noise added to each BPM reading, in metres.
+    bpm_noise: float = 0.0
+
+    # How much the machine varies from one episode to the next. Each is a multiplier
+    # on the spreads at the top of `sim_env.py`: 0 is the nominal model exactly, 1 is
+    # the machine as it realistically differs shot to shot and day to day, and larger
+    # values stay a harder version of the same problem rather than a different one.
+    # `reset()` draws a new beam, a new set point and a new survey error from them.
+    beam_variation: float = 1.0
+    magnet_variation: float = 1.0
+    misalignment_variation: float = 1.0
+
+    # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`, or
+    # `<corrector>_h` / `_v`). None gives it every magnet in the modelled stretch.
+    controllable_magnets: list[str] | None = None
+    # {knob name: [low, high]} overriding the archiver ranges in
+    # `data/clara/lattice_data/magnet_ranges.json`.
+    magnet_limits: dict[str, list[float]] | None = None

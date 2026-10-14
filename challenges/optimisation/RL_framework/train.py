@@ -9,6 +9,7 @@ from stable_baselines3.common.monitor import Monitor
 
 from rl_framework.config import RLConfig
 from rl_framework.envs.sim_env import SimEnv
+from rl_framework.wrappers import SB3Wrapper
 
 
 class ProgressCallback(BaseCallback):
@@ -42,9 +43,11 @@ class ProgressCallback(BaseCallback):
 def train(config: RLConfig, total_timesteps: int = 100, model_dir: str = "models"):
     os.makedirs(model_dir, exist_ok=True)
 
-    # Single environment with normalisation wrappers
+    # Single environment. SB3Wrapper turns SimEnv's dictionary action into the vector
+    # of magnets PPO needs and puts the observation in network units, which is also
+    # why NormalizeObservation is gone: it takes a single Box, not a dictionary.
     env = SimEnv(config)
-    env = gym.wrappers.NormalizeObservation(env)
+    env = SB3Wrapper(env)
     env = gym.wrappers.NormalizeReward(env)
     env = Monitor(env, filename=os.path.join(model_dir, "monitor.csv"))
 
@@ -59,7 +62,7 @@ def train(config: RLConfig, total_timesteps: int = 100, model_dir: str = "models
     progress_cb = ProgressCallback(report_every=1)
 
     model = PPO(
-        "MlpPolicy",
+        "MultiInputPolicy",  # the observation is a dictionary: BPMs and a camera
         env,
         verbose=1,
         n_steps=10
@@ -72,4 +75,9 @@ def train(config: RLConfig, total_timesteps: int = 100, model_dir: str = "models
 
 if __name__ == "__main__":
     cfg = RLConfig()
+    # Train on the magnets RealEnv drives, over the ranges it denormalises with, so an
+    # action means the same thing here and in `deploy.py`. Left alone, SimEnv offers
+    # every magnet of the line over its archiver range instead.
+    cfg.controllable_magnets = [magnet[0] for magnet in cfg.magnet_config]
+    cfg.magnet_limits = {magnet[0]: magnet[1:] for magnet in cfg.magnet_config}
     train(cfg)

@@ -1,86 +1,869 @@
+"""Simulation environment built on the nominal model.
+
+Beam, lattice and magnet strengths all come from `nominal_model/xsuite_model.py`: the
+measured starting beam at `cla_s02_sim_aper_01`, tracked through the strengths stored in
+the Cheetah lattice file to `cla_feh_dia_scr_01`, the screen `score.py` is judged on.
+
+Either of two models does the tracking, under `config.backend`: `"cheetah"`, the
+default, which is the first-order physics the benchmark is scored on and starts in a
+second, or `"xsuite"`, which is thick and chromatic and spends a minute compiling a
+tracking kernel. The lattice, the beam and everything below are the same either way.
+
+An action is a dictionary::
+
+    env.step({"magnets": {"cla_s04_mag_quad_01": 1.2,
+                          "cla_s04_mag_hvcor_01_h": 1e-4},
+              "screen": "cla_s04_dia_scr_03"})
+
+Only the magnets named are moved; every other magnet stays where it was. Both entries
+are optional, and a bare mapping of magnet settings is read as `{"magnets": ...}`.
+Settings may also be given in the nested form `score.py` uses,
+`{"cla_s04_mag_hvcor_01": {"horizontal_angle": 1e-4}}`. Values are clipped to the
+magnet's operating range (`env.magnet_limits`).
+
+`screen` picks the one screen that is in the beam — only one may be, and a screen in the
+beam intercepts it, so tracking stops there and every BPM downstream reads nothing.
+
+An observation is a dictionary of the BPM readings and the image on that screen::
+
+    {"bpm_x", "bpm_y":  metres off centre, in `env.bpm_names` order
+     "bpm_valid":       1 where enough beam reached that BPM to give a reading
+     "screen_image":    the viewed screen, rows are y, columns x, origin at the bottom
+     "screen_index":    which of `env.screen_names` the image came from}
+
+Positions are relative to the diagnostic's own centre, as a camera or a BPM reports
+them, and particles that leave the beam pipe stop counting towards any reading
+further down the line.
+
+Every `reset()` draws a different machine: a beam of its own size, shape and
+position, magnets sitting a little off the strengths they were asked for, and a
+survey error on the quadrupoles, sextupoles and diagnostics. How far each of those
+is thrown is `config.beam_variation`, `config.magnet_variation` and
+`config.misalignment_variation`, where 0 is the nominal model exactly and 1 is the
+realistic machine. The magnets are the episode's starting point and an agent can
+tune them away; the survey error it is stuck with, as on the real machine. What was
+drawn is in `env.beam_offset`, `env.setpoint` and `env.misalignments`.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator, Mapping
+
 import cheetah
-import torch
+import gymnasium as gym
 import numpy as np
+import torch
+from gymnasium import spaces
 
 from rl_framework.config import RLConfig
 from rl_framework.envs.base_env import BaseAcceleratorEnv
 
+# .../challenges/optimisation, which holds `nominal_model/` and `data/`.
+CHALLENGE_DIR = Path(__file__).resolve().parents[3]
+MAGNET_RANGES_JSON = (
+    CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "magnet_ranges.json"
+)
+
+BPM_TAG = "dia_bpm"
+SCREEN_TAG = "dia_scr"
+APERTURE_TAG = "sim_aper"
+
+DTYPE = torch.float32  # what the Cheetah lattice file is parsed into
+
+# What one knob of each magnet type is called, and the suffix its knob name carries.
+PROPERTY_SUFFIX = {"k1": "", "k2": "", "horizontal_angle": "_h", "vertical_angle": "_v"}
+# Half-span for a magnet the archiver file does not cover, as in `score._span`.
+FALLBACK_SPAN = {"k1": 3.0, "k2": 50.0, "horizontal_angle": 5e-4, "vertical_angle": 5e-4}
+
+# ---- how far one episode's machine is from the next, at a variation of 1 ---- #
+
+# Injection jitter, absolute and roughly what CLARA sees shot to shot, as in
+# `score.sample_beam`. Order: x, px, y, py, tau, delta.
+CENTROID_JITTER = np.array([50e-6, 50e-6, 50e-6, 50e-6, 100e-6, 1e-3])
+# Multiplicative spreads, each landing in [1/s, s] and widening geometrically with
+# the variation: a positive quantity cannot be widened by adding to it.
+SIGMA_SPREAD = 1.3  # rms size of a plane, at constant shape
+BETA_SPREAD = 1.2  # mismatch: size against divergence, at constant emittance
+# Where the magnets sit when the episode starts, against the strengths the lattice
+# file carries. Relative, because a power supply's error follows its set point, plus
+# a floor for the magnets parked at zero — every corrector, in the nominal tune.
+MAGNET_ERROR_RELATIVE = 0.01
+MAGNET_ERROR_FLOOR = {
+    "k1": 1e-3,
+    "k2": 1e-2,
+    "horizontal_angle": 1e-5,
+    "vertical_angle": 1e-5,
+}
+# Set point errors an operating range has to hold, so the machine never starts
+# outside the range the agent is allowed to work in.
+SETPOINT_HEADROOM = 5
+# Survey error, per plane, as in `score.sample_misalignments`.
+MISALIGNMENT_RMS = 50e-6  # quadrupoles and sextupoles
+DIAGNOSTIC_OFFSET_RMS = 30e-6  # the centring of a camera or a BPM
 
 
+def _import_xsuite_model(directory: str | Path | None):
+    """The nominal model, which is a module in a folder rather than a package."""
+    directory = str(Path(directory or CHALLENGE_DIR / "nominal_model").resolve())
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import xsuite_model
 
+    return xsuite_model
+
+
+class Transport(ABC):
+    """One of the two models the environment can track its beam through.
+
+    Both carry the same elements under the same names, so the environment works in
+    names and in Cheetah's units and leaves each model to find and write its own
+    elements. `config.backend` picks between them.
+    """
+
+    name: str
+
+    @abstractmethod
+    def read(self, element: str, prop: str) -> float:
+        """What a magnet is set to, in the lattice file's units."""
+
+    @abstractmethod
+    def write(self, element: str, prop: str, value: float) -> None:
+        """Set a magnet, in the lattice file's units."""
+
+    @abstractmethod
+    def read_shift(self, element: str) -> tuple[float, float]:
+        """Where an element sits against the design axis."""
+
+    @abstractmethod
+    def shift(self, element: str, dx: float, dy: float) -> None:
+        """Move an element off the design axis."""
+
+    @abstractmethod
+    def run(
+        self, coordinates: np.ndarray, stops: list[str]
+    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
+        """Track from the start of the line, yielding (stop, x, y, alive) at each of
+        `stops` in turn. `stops` runs from the start of the line to wherever the beam
+        is being read, and x, y and alive are in the order the particles were given."""
+
+
+class CheetahTransport(Transport):
+    """Cheetah: first-order magnets and achromatic cavities, tracked in torch.
+
+    The physics `score.py` is scored on, and the faster of the two to set up — there
+    is no tracking kernel to compile.
+    """
+
+    name = "cheetah"
+
+    def __init__(self, segment: cheetah.Segment, energy_ev: float, stops: list[str]):
+        self._segment = segment
+        self._elements = {element.name: element for element in segment.elements}
+        self._energy = torch.tensor(float(energy_ev), dtype=DTYPE)
+        for element in segment.elements:
+            if isinstance(element, cheetah.Screen):
+                # The environment does its own imaging, and an active screen costs a
+                # full camera frame at every diagnostic in the line.
+                element.is_active = False
+        # One sub-segment per stop, over the same element objects, so each stretch is
+        # tracked as one fused transfer map instead of element by element.
+        self._chunks, previous = {}, 0
+        for stop in stops:
+            index = segment.element_index(stop)
+            self._chunks[stop] = cheetah.Segment(segment.elements[previous:index])
+            previous = index
+
+    def read(self, element: str, prop: str) -> float:
+        return float(getattr(self._elements[element], prop))
+
+    def write(self, element: str, prop: str, value: float) -> None:
+        setattr(self._elements[element], prop, torch.tensor(value, dtype=DTYPE))
+
+    def read_shift(self, element: str) -> tuple[float, float]:
+        misalignment = self._elements[element].misalignment
+        return float(misalignment[0]), float(misalignment[1])
+
+    def shift(self, element: str, dx: float, dy: float) -> None:
+        self._elements[element].misalignment = torch.tensor([dx, dy], dtype=DTYPE)
+
+    def run(self, coordinates, stops):
+        particles = torch.tensor(
+            np.column_stack([coordinates, np.ones(len(coordinates))]), dtype=DTYPE
+        )
+        beam = cheetah.ParticleBeam(particles=particles, energy=self._energy)
+        for stop in stops:
+            chunk = self._chunks[stop]
+            if len(chunk.elements):
+                beam = chunk.track(beam)
+            yield (
+                stop,
+                beam.x.detach().numpy(),
+                beam.y.detach().numpy(),
+                beam.survival_probabilities.detach().numpy() > 0.5,
+            )
+
+
+class XsuiteTransport(Transport):
+    """xsuite: thick elements at each particle's own momentum, and standing-wave
+    cavities that focus at the energy the particle has.
+
+    Closer to the machine off momentum, and the model `nominal_model/README.md`
+    documents. Building the line compiles a tracking kernel, which takes a minute.
+    """
+
+    name = "xsuite"
+
+    def __init__(self, model, lattice_json, start, end, energy_ev, stops):
+        self.converted = model.build_line(energy_ev, lattice_json, start, end)
+        self._model = model
+        self._line = self.converted.line
+        self._index = {name: i for i, name in enumerate(self._line.element_names)}
+        self._stops = [(stop, self._index[stop]) for stop in stops]
+
+    def _element(self, name: str):
+        return self._line.element_dict[name]
+
+    def read(self, element: str, prop: str) -> float:
+        target = self._element(element)
+        if prop == "horizontal_angle":
+            return -float(target.knl[0])  # Cheetah's kick is the opposite of knl
+        if prop == "vertical_angle":
+            return float(target.ksl[0])
+        return float(getattr(target, prop))
+
+    def write(self, element: str, prop: str, value: float) -> None:
+        target = self._element(element)
+        if prop == "horizontal_angle":
+            target.knl[0] = -value
+        elif prop == "vertical_angle":
+            target.ksl[0] = value
+        else:
+            setattr(target, prop, value)
+
+    def read_shift(self, element: str) -> tuple[float, float]:
+        target = self._element(element)
+        return float(target.shift_x), float(target.shift_y)
+
+    def shift(self, element: str, dx: float, dy: float) -> None:
+        target = self._element(element)
+        target.shift_x, target.shift_y = dx, dy
+
+    def _ordered(self, particles, count):
+        """x, y and alive, in the order the particles were launched in."""
+        ids = np.asarray(particles.particle_id)
+        slots = np.flatnonzero((ids >= 0) & (ids < count))
+        x, y = np.zeros(count), np.zeros(count)
+        alive = np.zeros(count, dtype=bool)
+        x[ids[slots]] = np.asarray(particles.x)[slots]
+        y[ids[slots]] = np.asarray(particles.y)[slots]
+        alive[ids[slots]] = np.asarray(particles.state)[slots] > 0
+        return x, y, alive
+
+    def run(self, coordinates, stops):
+        x0, px0, y0, py0, tau0, delta0 = coordinates.T
+        particles = self._model.electron_particles(
+            self.converted.initial_energy_ev,
+            x=x0, px=px0, y=y0, py=py0, zeta=-tau0, delta=delta0,
+        )
+        count, at = len(coordinates), 0
+        for stop, index in self._stops[: len(stops)]:
+            if index > at:
+                self._line.track(particles, ele_start=at, ele_stop=index)
+                at = index
+            yield (stop, *self._ordered(particles, count))
+
+
+def _setpoint_error_rms(prop: str, nominal: float) -> float:
+    """How far from its asked-for strength a magnet sits, at a variation of 1."""
+    return MAGNET_ERROR_RELATIVE * abs(nominal) + MAGNET_ERROR_FLOOR[prop]
+
+
+def _spread(rng, spread: float, variation: float) -> float:
+    """A factor log-uniform in [1/spread, spread], widened geometrically by
+    `variation` so that a larger variation is more of the same, not something else."""
+    reach = np.log(spread) * np.sqrt(variation)
+    return float(np.exp(rng.uniform(-reach, reach)))
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    """A screen or BPM: where it sits in the line and how big its chip is."""
+
+    name: str
+    index: int  # into `line.element_names`
+    extent: tuple[float, float, float, float]  # x_min, x_max, y_min, y_max, metres
+    misalignment: tuple[float, float]
+
+
+@dataclass
+class Knob:
+    """One number an agent can set: a quadrupole k1, a sextupole k2, or one plane of a
+    corrector. Always in the lattice file's units, so the numbers match
+    `magnet_ranges.json` and `score.py` whichever model is doing the tracking."""
+
+    name: str
+    element_name: str
+    prop: str
+    transport: Transport
+    low: float
+    high: float
+
+    @property
+    def value(self) -> float:
+        return self.transport.read(self.element_name, self.prop)
+
+    def set(self, value: float, clip: bool = True) -> float:
+        """Set it, clipped to the operating range. Returns what the magnet ended up
+        at, which is not quite what was asked for — Cheetah's lattice is float32."""
+        value = float(value)
+        if clip:
+            value = float(np.clip(value, self.low, self.high))
+        self.transport.write(self.element_name, self.prop, value)
+        return self.value
 
 
 class SimEnv(BaseAcceleratorEnv):
-    """
-    Simulation environment using cheetah-accelerator.
-    No CATAP dependency — runs entirely in PyTorch.
-    """
+    """Simulation environment using the nominal model of CLARA."""
 
     def __init__(self, config: RLConfig):
         super().__init__(config)
-        self._lattice: cheetah.Segment = cheetah.Segment.from_lattice_json(self.config.lattice_path)
+        self.model = _import_xsuite_model(config.nominal_model_dir)
+        lattice_json = config.nominal_lattice_json or self.model.LATTICE_JSON
 
-    def _hard_reset(self) -> np.ndarray:
-        # Activate the target screen (screens default to inactive in the lattice JSON)
-        idx = self._lattice.element_index(self.config.target_screen)
-        self._lattice.elements[idx].is_active = True
+        coordinates, energy_ev, self.beam_metadata = self.model.load_distribution(
+            config.distribution_path or self.model.INITIAL_DISTRIBUTION
+        )
+        if config.num_particles is not None:
+            coordinates = coordinates[: config.num_particles]
+        # The beam as it was measured, and the one this episode was dealt.
+        self._reference_coordinates = np.ascontiguousarray(coordinates)
+        self._coordinates = self._reference_coordinates
+        self.energy_ev = energy_ev
 
-        # Zero all controllable magnets
-        self._set_magnets_to_zero()
+        # The Cheetah segment is the lattice: the element types, the magnet strengths
+        # and the screen geometry, which an xsuite line has no notion of (every
+        # diagnostic converts to a marker). One of the two models then tracks it.
+        self.segment = self.model.cheetah_segment(
+            lattice_json, config.lattice_start, config.lattice_end
+        )
 
+        self._diagnostics = {
+            element.name: Diagnostic(
+                name=element.name,
+                index=index,
+                extent=tuple(float(v) for v in element.extent),
+                misalignment=tuple(float(v) for v in element.misalignment),
+            )
+            for index, element in enumerate(self.segment.elements)
+            if isinstance(element, cheetah.Screen)
+        }
+        self.bpm_names = [n for n in self._diagnostics if BPM_TAG in n]
+        self.screen_names = [n for n in self._diagnostics if SCREEN_TAG in n]
+        if not self.screen_names:
+            raise ValueError(
+                f"no screens between {config.lattice_start} and {config.lattice_end}"
+            )
+        # Where tracking pauses to read a diagnostic and to scrape the beam pipe.
+        self._stops = sorted(
+            (
+                diagnostic
+                for name, diagnostic in self._diagnostics.items()
+                if any(tag in name for tag in (BPM_TAG, SCREEN_TAG, APERTURE_TAG))
+            ),
+            key=lambda diagnostic: diagnostic.index,
+        )
+        self.transport = self._build_transport(lattice_json, energy_ev)
+
+        self._shape = tuple(int(n) for n in config.screen_shape)
+        self._bin_edges = {
+            name: (
+                np.linspace(*diagnostic.extent[2:], self._shape[0] + 1),  # rows: y
+                np.linspace(*diagnostic.extent[:2], self._shape[1] + 1),  # columns: x
+            )
+            for name, diagnostic in self._diagnostics.items()
+        }
+
+        self._knobs = self._build_knobs(self.segment)
+        self.magnet_names = list(self._controllable)
+        self.magnet_limits = {
+            name: (self._knobs[name].low, self._knobs[name].high)
+            for name in self._controllable
+        }
+        # The strengths the lattice file carries, for every magnet of the line and
+        # not just the settable ones — what each episode starts near.
+        self._nominal_strengths = {
+            name: knob.value for name, knob in self._knobs.items()
+        }
+        self.setpoint = dict(self._nominal_strengths)
+
+        # Elements a survey error can move, and where the lattice file already has
+        # them. Quadrupoles and sextupoles, as in `score.sample_misalignments`.
+        self._misalignable = [
+            element.name
+            for element in self.segment.elements
+            if isinstance(element, (cheetah.Quadrupole, cheetah.Sextupole))
+        ]
+        self._nominal_shifts = {
+            name: self.transport.read_shift(name) for name in self._misalignable
+        }
+        self.misalignments = dict(self._nominal_shifts)
+        self.beam_offset = np.zeros(6)
+        # Where each diagnostic's centre is this episode, its own offset included.
+        self._offsets = {
+            name: np.array(diagnostic.misalignment)
+            for name, diagnostic in self._diagnostics.items()
+        }
+
+        self.action_space = spaces.Dict(
+            {
+                "magnets": spaces.Dict(
+                    {
+                        name: spaces.Box(
+                            low=self._knobs[name].low,
+                            high=self._knobs[name].high,
+                            shape=(),
+                            dtype=np.float32,
+                        )
+                        for name in self._controllable
+                    }
+                ),
+                "screen": spaces.Discrete(len(self.screen_names)),
+            }
+        )
+        image_high = 1.0 if config.normalise_image else np.inf
+        self.observation_space = spaces.Dict(
+            {
+                "bpm_x": spaces.Box(-np.inf, np.inf, (len(self.bpm_names),), np.float32),
+                "bpm_y": spaces.Box(-np.inf, np.inf, (len(self.bpm_names),), np.float32),
+                "bpm_valid": spaces.MultiBinary(len(self.bpm_names)),
+                "screen_image": spaces.Box(0.0, image_high, self._shape, np.float32),
+                "screen_index": spaces.Discrete(len(self.screen_names)),
+            }
+        )
+
+        self._rng = np.random.default_rng()
+        self.target_screen = config.target_screen
+        self._readings: dict[str, Any] = {}
+        self._simulate()
+
+    # ---------- the model doing the tracking ----------
+
+    def _build_transport(self, lattice_json, energy_ev: float) -> Transport:
+        """Whichever of the two models `config.backend` asks for."""
+        stops = [diagnostic.name for diagnostic in self._stops]
+        if self.config.backend == CheetahTransport.name:
+            return CheetahTransport(self.segment, energy_ev, stops)
+        if self.config.backend == XsuiteTransport.name:
+            return XsuiteTransport(
+                self.model,
+                lattice_json,
+                self.config.lattice_start,
+                self.config.lattice_end,
+                energy_ev,
+                stops,
+            )
+        raise ValueError(
+            f"{self.config.backend!r} is not a backend: "
+            f"{CheetahTransport.name!r} or {XsuiteTransport.name!r}."
+        )
+
+    # ---------- magnets ----------
+
+    def _build_knobs(self, segment) -> dict[str, Knob]:
+        """Every magnet of the modelled stretch, as one knob per settable number.
+
+        All of them are modelled, because a magnet the agent is not allowed to touch
+        still sits where it sits; `controllable_magnets` only says which ones it may
+        set, and that becomes `self._controllable`.
+        """
+        ranges = json.loads(MAGNET_RANGES_JSON.read_text())["elements"]
+        overrides = self.config.magnet_limits or {}
+        wanted = self.config.controllable_magnets
+        self._error_rms: dict[str, float] = {}
+        properties = {
+            cheetah.Quadrupole: ("k1",),
+            cheetah.Sextupole: ("k2",),
+            cheetah.CombinedCorrector: ("horizontal_angle", "vertical_angle"),
+        }
+
+        knobs: dict[str, Knob] = {}
+        for element in segment.elements:
+            props = next(
+                (p for kind, p in properties.items() if isinstance(element, kind)), ()
+            )
+            for prop in props:
+                name = element.name + PROPERTY_SUFFIX[prop]
+                knob = Knob(
+                    name=name,
+                    element_name=element.name,
+                    prop=prop,
+                    transport=self.transport,
+                    low=-np.inf,
+                    high=np.inf,
+                )
+                # Its range needs the strength it starts at, so it is set second.
+                knob.low, knob.high = (
+                    (float(overrides[name][0]), float(overrides[name][1]))
+                    if name in overrides
+                    else self._operating_range(
+                        ranges.get(element.name, {}).get(prop), prop, knob.value
+                    )
+                )
+                knobs[name] = knob
+                self._error_rms[name] = _setpoint_error_rms(prop, knob.value)
+        missing = set(wanted or ()) - set(knobs)
+        if missing:
+            raise KeyError(
+                f"no such magnets between {self.config.lattice_start} and "
+                f"{self.config.lattice_end}: {sorted(missing)}"
+            )
+        self._controllable = list(wanted) if wanted is not None else list(knobs)
+        return knobs
+
+    @staticmethod
+    def _operating_range(archived, prop: str, nominal: float) -> tuple[float, float]:
+        """What a magnet may be set to: what it ran between over six months of CLARA
+        operation, where `magnet_ranges.json` has it.
+
+        Widened to hold the strength the lattice file carries, which is sometimes
+        outside the archived percentiles and, for the FEA arc quadrupoles, outside an
+        archived range of [0, 0] — they were never powered in that period. Clipping
+        those to the archiver would throw away the tune the model starts from. The
+        margin is the set point error an episode can start with, so the machine is
+        never handed over sitting outside the range it may be tuned in.
+        """
+        low, high = (
+            (float(archived[0]), float(archived[1]))
+            if archived is not None
+            else (-FALLBACK_SPAN[prop], FALLBACK_SPAN[prop])
+        )
+        margin = SETPOINT_HEADROOM * _setpoint_error_rms(prop, nominal)
+        low, high = min(low, nominal - margin), max(high, nominal + margin)
+        if high == low:  # archived at a single value, and parked there
+            low, high = nominal - FALLBACK_SPAN[prop], nominal + FALLBACK_SPAN[prop]
+        return low, high
+
+    def magnet_settings(self) -> dict[str, float]:
+        """What every controllable magnet is set to, in native units."""
+        return {name: self._knobs[name].value for name in self._controllable}
+
+    def set_magnets(self, settings: Mapping[str, Any]) -> dict[str, float]:
+        """Set some of the magnets, leaving the rest alone. Returns what was applied.
+
+        Keys are knob names (`cla_s04_mag_quad_01`, `cla_s04_mag_hvcor_01_h`) with a
+        value each, or element names with a `{property: value}` mapping.
+        """
+        applied = {}
+        for name, value in settings.items():
+            if isinstance(value, Mapping):
+                for prop, number in value.items():
+                    if prop not in PROPERTY_SUFFIX:
+                        raise KeyError(f"{name}: not a magnet property: {prop}")
+                    knob = self._knob(name + PROPERTY_SUFFIX[prop])
+                    applied[knob.name] = knob.set(number)
+            else:
+                knob = self._knob(name)
+                applied[knob.name] = knob.set(value)
+        return applied
+
+    def _knob(self, name: str) -> Knob:
+        if name in self._knobs and name not in self._controllable:
+            raise KeyError(
+                f"{name} is a magnet of this line but not one the agent may set. "
+                f"`config.controllable_magnets` decides that."
+            )
+        try:
+            return self._knobs[name]
+        except KeyError:
+            raise KeyError(
+                f"{name} is not a controllable magnet. Correctors take a _h or _v "
+                f"suffix; `env.magnet_names` lists all {len(self._controllable)}."
+            ) from None
+
+    def _denormalise_action(self, action: np.ndarray) -> np.ndarray:
+        """Map a normalised [-1, 1] vector to native units, in `magnet_names` order."""
+        low = np.array([self._knobs[n].low for n in self._controllable], float)
+        high = np.array([self._knobs[n].high for n in self._controllable], float)
+        return (low + high) / 2 + np.asarray(action, dtype=np.float64) * (high - low) / 2
+
+    # ---------- the machine this episode was dealt ----------
+
+    def _draw_beam(self) -> np.ndarray:
+        """A beam of its own size, shape and position, from the measured one."""
+        variation = self.config.beam_variation
+        self.beam_offset = np.zeros(6)
+        if not variation:
+            return self._reference_coordinates
+
+        coordinates = self._reference_coordinates - self._reference_coordinates.mean(
+            axis=0
+        )
+        for position, momentum in ((0, 1), (2, 3)):  # x-x', then y-y'
+            size = _spread(self._rng, SIGMA_SPREAD, variation)
+            mismatch = _spread(self._rng, BETA_SPREAD, variation)
+            coordinates[:, position] *= size * mismatch
+            coordinates[:, momentum] *= size / mismatch
+        for column in (4, 5):  # bunch length and energy spread
+            coordinates[:, column] *= _spread(self._rng, SIGMA_SPREAD, variation)
+
+        self.beam_offset = (
+            self._rng.uniform(-CENTROID_JITTER, CENTROID_JITTER) * variation
+        )
+        return coordinates + self._reference_coordinates.mean(axis=0) + self.beam_offset
+
+    def _draw_setpoint(self) -> dict[str, float]:
+        """Magnets near, but not on, the strengths the lattice file asks for."""
+        variation = self.config.magnet_variation
+        self.setpoint = {}
+        for name, knob in self._knobs.items():
+            nominal = self._nominal_strengths[name]
+            error = (
+                self._rng.normal(0.0, self._error_rms[name] * variation)
+                if variation
+                else 0.0
+            )
+            # Unperturbed, the tune goes back exactly, whatever the limits say.
+            self.setpoint[name] = knob.set(nominal + error, clip=bool(variation))
+        return self.setpoint
+
+    def _draw_misalignments(self) -> dict[str, tuple[float, float]]:
+        """A survey error on the magnets, and a centring error on the diagnostics."""
+        variation = self.config.misalignment_variation
+
+        def error(rms):
+            return self._rng.normal(0.0, rms * variation, 2) if variation else np.zeros(2)
+
+        self.misalignments = {}
+        for name in self._misalignable:
+            dx, dy = np.array(self._nominal_shifts[name]) + error(MISALIGNMENT_RMS)
+            self.transport.shift(name, float(dx), float(dy))
+            self.misalignments[name] = (float(dx), float(dy))
+        for name, diagnostic in self._diagnostics.items():
+            offset = np.array(diagnostic.misalignment)
+            if BPM_TAG in name or SCREEN_TAG in name:
+                offset = offset + error(DIAGNOSTIC_OFFSET_RMS)
+            self._offsets[name] = offset
+        return self.misalignments
+
+    # ---------- the observed screen ----------
+
+    @property
+    def target_screen(self) -> str:
+        """The one screen in the beam. Everything downstream of it is in its shadow."""
+        return self._target_screen
+
+    @target_screen.setter
+    def target_screen(self, screen: str | int) -> None:
+        if isinstance(screen, (int, np.integer)):
+            screen = self.screen_names[int(screen)]
+        if screen not in self.screen_names:
+            raise KeyError(
+                f"{screen} is not a screen of this line. `env.screen_names` lists all "
+                f"{len(self.screen_names)}."
+            )
+        self._target_screen = screen
+
+    def screen_extent(self, screen: str | None = None) -> tuple[float, float, float, float]:
+        """(x_min, x_max, y_min, y_max) in metres that a screen image spans."""
+        return self._diagnostics[screen or self._target_screen].extent
+
+    # ---------- tracking ----------
+
+    def _simulate(self) -> None:
+        """Track the beam to the screen in the beam, reading every BPM on the way."""
+        count = len(self._coordinates)
+        minimum = self.config.min_screen_fraction * count
+        radius = self.config.beam_pipe_radius
+
+        bpm_x = np.zeros(len(self.bpm_names))
+        bpm_y = np.zeros(len(self.bpm_names))
+        bpm_valid = np.zeros(len(self.bpm_names), dtype=np.int8)
+        bpm_slot = {name: i for i, name in enumerate(self.bpm_names)}
+        screen = self._diagnostics[self._target_screen]
+
+        live = np.ones(count, dtype=bool)
+        image = np.zeros(self._shape)
+        fraction = 0.0
+        stats = (0.0, 0.0, 0.0, 0.0, False)
+
+        # Everything past the screen is in its shadow: a screen in the beam stops it.
+        stops = [stop.name for stop in self._stops if stop.index <= screen.index]
+        for name, x, y, alive in self.transport.run(self._coordinates, stops):
+            live &= alive
+            if radius is not None:
+                live &= x**2 + y**2 <= radius**2  # scraped on the beam pipe
+
+            if name in bpm_slot and live.sum() >= minimum:
+                slot = bpm_slot[name]
+                offset = self._offsets[name]
+                bpm_x[slot] = x[live].mean() - offset[0]
+                bpm_y[slot] = y[live].mean() - offset[1]
+                bpm_valid[slot] = 1
+            if name == screen.name:
+                image, fraction, stats = self._expose(screen, x, y, live)
+
+        if self.config.bpm_noise:
+            noise = self._rng.normal(0.0, self.config.bpm_noise, (2, len(bpm_x)))
+            bpm_x += noise[0] * bpm_valid
+            bpm_y += noise[1] * bpm_valid
+
+        self._readings = {
+            "bpm_x": bpm_x,
+            "bpm_y": bpm_y,
+            "bpm_valid": bpm_valid,
+            "image": image,
+            "on_screen_fraction": fraction,
+            "stats": stats,
+            "transmission": float(live.sum()) / count,
+        }
+
+    def _expose(self, screen: Diagnostic, x: np.ndarray, y: np.ndarray, live: np.ndarray):
+        """The image on a screen, the fraction of the beam that made it onto the chip,
+        and the moments a camera would measure from it."""
+        offset = self._offsets[screen.name]
+        x = x[live] - offset[0]
+        y = y[live] - offset[1]
+        on_chip = (np.abs(x) <= screen.extent[1]) & (np.abs(y) <= screen.extent[3])
+        x, y = x[on_chip], y[on_chip]
+
+        rows, columns = self._bin_edges[screen.name]
+        image, _, _ = np.histogram2d(y, x, bins=(rows, columns))
+        if self.config.normalise_image and image.max() > 0:
+            image = image / image.max()
+
+        fraction = float(on_chip.sum()) / len(live)
+        if fraction < self.config.min_screen_fraction:
+            return image, fraction, (0.0, 0.0, 0.0, 0.0, False)
+        stats = (
+            float(x.mean()),
+            float(y.mean()),
+            float(x.std()),
+            float(y.std()),
+            True,
+        )
+        return image, fraction, stats
+
+    # ---------- gym API ----------
+
+    def _get_obs(self) -> dict[str, Any]:
+        return {
+            "bpm_x": self._readings["bpm_x"].astype(np.float32),
+            "bpm_y": self._readings["bpm_y"].astype(np.float32),
+            "bpm_valid": self._readings["bpm_valid"],
+            "screen_image": self._readings["image"].astype(np.float32),
+            "screen_index": self.screen_names.index(self._target_screen),
+        }
+
+    def _get_info(self) -> dict[str, Any]:
+        mu_x, mu_y, sigma_x, sigma_y, on_screen = self._readings["stats"]
+        return {
+            "screen": self._target_screen,
+            "screen_extent": self.screen_extent(),
+            "mu_x": mu_x,
+            "mu_y": mu_y,
+            "sigma_x": sigma_x,
+            "sigma_y": sigma_y,
+            "on_screen": on_screen,
+            "on_screen_fraction": self._readings["on_screen_fraction"],
+            "transmission": self._readings["transmission"],
+            "magnets": self.magnet_settings(),
+        }
+
+    def step(self, action):
+        settings, screen = self._parse_action(action)
+        if settings:
+            self.set_magnets(settings)
+        if screen is not None:
+            self.target_screen = screen
+        self._simulate()
+
+        reward = self._compute_reward(*self._readings["stats"])
+        self._step_count += 1
+        truncated = self._step_count >= self.config.max_episode_steps
+        return self._get_obs(), reward, False, truncated, self._get_info()
+
+    def reset(self, *, seed=None, options=None):
+        gym.Env.reset(self, seed=seed)  # the base class reset returns no info
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        self._step_count = 0
+        return self._hard_reset(), self._get_info()
+
+    def _parse_action(self, action) -> tuple[Mapping[str, Any], str | int | None]:
+        """(magnet settings, screen) out of an action.
+
+        A mapping with a `magnets` or `screen` entry is read as those two; any other
+        mapping is read as magnet settings alone. A plain sequence is read as a
+        normalised [-1, 1] setting for every magnet, in `magnet_names` order.
+        """
+        if action is None:
+            return {}, None
+        if isinstance(action, Mapping):
+            if "magnets" in action or "screen" in action or "target_screen" in action:
+                unknown = set(action) - {"magnets", "screen", "target_screen"}
+                if unknown:
+                    raise KeyError(
+                        f"an action with a `magnets` or `screen` entry takes no other "
+                        f"entries: {sorted(unknown)}"
+                    )
+                screen = action.get("screen", action.get("target_screen"))
+                return action.get("magnets") or {}, screen
+            return action, None
+        values = self._denormalise_action(np.asarray(action, dtype=np.float64).reshape(-1))
+        if len(values) != len(self._controllable):
+            raise ValueError(
+                f"an action vector has one entry per settable magnet "
+                f"({len(self._controllable)}), got {len(values)}"
+            )
+        return dict(zip(self.magnet_names, values)), None
+
+    def _compute_reward(self, mu_x, mu_y, sigma_x, sigma_y, on_screen) -> float:
+        """Negative beam size at the observed screen, in mm, with the centroid
+        penalised. The base class works in pixels; here the statistics are in metres,
+        so they are scaled to keep the reward comparable to the off-screen penalty."""
+        if not on_screen:
+            return float(-1000)
+        return float(-(sigma_x + sigma_y + 0.1 * (abs(mu_x) + abs(mu_y))) * 1e3)
+
+    # ---------- base class hooks ----------
+
+    def _hard_reset(self) -> dict[str, Any]:
+        """A new machine: its own beam, set point and survey error, at the configured
+        screen. With every variation at 0 this is the nominal model exactly."""
+        self._coordinates = self._draw_beam()
+        self._draw_setpoint()
+        self._draw_misalignments()
+
+        self.target_screen = self.config.target_screen
+        self._simulate()
         return self._get_obs()
 
-    def _set_magnets_to_zero(self):
-        """Set every controllable magnet to its native zero."""
-        native = np.zeros(len(self.config.magnet_config), dtype=np.float32)
-        self._apply_action(native)
-
     def _apply_action(self, native_values: np.ndarray):
-        for i, name in enumerate(self._magnet_names):
-            if name[-2:] == "_h" or name[-2:] == "_v": # handle combined corrector naming convention
-                idx = self._lattice.element_index(name[:-2])
-            else:
-                idx = self._lattice.element_index(name)
-            el = self._lattice.elements[idx]
-            val = float(native_values[i])
-
-            if isinstance(el, cheetah.Quadrupole):
-                el.k1 = torch.tensor(val)
-            elif isinstance(el, cheetah.CombinedCorrector):
-                if name[-2:] == "_h":
-                    el.horizontal_angle = torch.tensor(val)
-                elif name[-2:] == "_v":
-                    el.vertical_angle = torch.tensor(val)
-                else:
-                    raise ValueError(f"Combined corrector {name} does not follow naming convention with _h or _v suffix.")
-            elif isinstance(el, cheetah.Dipole):
-                el.k1 = torch.tensor(val)
-            elif isinstance(el, cheetah.HorizontalCorrector) or isinstance(el, cheetah.VerticalCorrector):
-                el.angle = torch.tensor(val)
-            else:
-                raise ValueError(f"Element {name} is not a supported magnet type.")
-            
-        # Create beam
-        beam = self._beam_factory()
-        self._lattice.track(beam)
+        """Set every magnet, in `magnet_names` order and in native units."""
+        values = np.asarray(native_values, dtype=np.float64).reshape(-1)
+        if len(values) != len(self._controllable):
+            raise ValueError(
+                f"expected one value per settable magnet "
+                f"({len(self._controllable)}), got {len(values)}"
+            )
+        self.set_magnets(dict(zip(self.magnet_names, values)))
+        self._simulate()
 
     def _get_screen_statistics(self, screen_name: str) -> tuple[float, float, float, float, bool]:
-        idx = self._lattice.element_index(screen_name)
-        screen: cheetah.Screen = self._lattice.elements[idx]
-        return self._read_screen_stats(screen.reading.detach().numpy())
+        """(mu_x, mu_y, sigma_x, sigma_y, on_screen) in metres, off the screen centre.
 
-    def _beam_factory(self) -> cheetah.ParticleBeam:
-        """Create a ParticleBeam from the Twiss parameters stored in config."""
-        b = self.config.beam
-        return cheetah.ParticleBeam.from_twiss(
-            num_particles=b["num_particles"],
-            alpha_x=torch.tensor(b["alpha_x"]),
-            beta_x=torch.tensor(b["beta_x"]),
-            emittance_x=torch.tensor(b["emittance_x"]),
-            alpha_y=torch.tensor(b["alpha_y"]),
-            beta_y=torch.tensor(b["beta_y"]),
-            emittance_y=torch.tensor(b["emittance_y"]),
-            sigma_p=torch.tensor(b["sigma_p"]),
-            energy=torch.tensor(b["energy"]),
-            total_charge=torch.tensor(b["total_charge"]),
-        )
+        Only the screen in the beam has a reading: the others are out, and anything
+        downstream of this one is in its shadow.
+        """
+        if screen_name != self._target_screen:
+            raise ValueError(
+                f"{screen_name} is not in the beam — only one screen may be, and it is "
+                f"{self._target_screen}. Set `env.target_screen` or pass a `screen` "
+                f"entry in the action to move it."
+            )
+        return self._readings["stats"]
