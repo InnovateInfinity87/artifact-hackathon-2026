@@ -12,7 +12,7 @@ def main() -> None:
     jac, reference, labels, sigma0 = (data[k] for k in ("jac", "reference", "labels", "sigma0"))
     names = [str(label) for label in labels]
     _config_of = np.repeat([n.split("|")[0] for n in names], 3)
-    screen_of = np.repeat([n.split("|")[1] for n in names], 3)
+    _screen_of = np.repeat([n.split("|")[1] for n in names], 3)
     ref = reference.reshape(-1, 3)
     rms_x, rms_y = np.sqrt(ref[:, 0]), np.sqrt(np.maximum(ref[:, 1], 0))
     imageable_row = np.repeat((rms_x < 4e-3) & (rms_y < 4e-3), 3)
