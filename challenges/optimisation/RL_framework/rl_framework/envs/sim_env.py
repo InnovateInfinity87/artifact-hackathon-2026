@@ -43,13 +43,20 @@ is thrown is `config.beam_variation`, `config.magnet_variation` and
 realistic machine. The magnets are the episode's starting point and an agent can
 tune them away; the survey error it is stuck with, as on the real machine. What was
 drawn is in `env.beam_offset`, `env.setpoint` and `env.misalignments`.
+
+Within an episode the machine then holds still but the beam does not: every step is
+a shot of its own, drawn around the episode's beam at `config.beam_jitter` of
+`config.beam_variation`, and left in `env.shot_offset`. Two identical actions do not
+give identical readings, which is what reading a screen on a real machine is like.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -68,6 +75,7 @@ CHALLENGE_DIR = Path(__file__).resolve().parents[3]
 MAGNET_RANGES_JSON = (
     CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "magnet_ranges.json"
 )
+LATTICE_UTILS_PY = CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "utils.py"
 
 BPM_TAG = "dia_bpm"
 SCREEN_TAG = "dia_scr"
@@ -76,9 +84,22 @@ APERTURE_TAG = "sim_aper"
 DTYPE = torch.float32  # what the Cheetah lattice file is parsed into
 
 # What one knob of each magnet type is called, and the suffix its knob name carries.
-PROPERTY_SUFFIX = {"k1": "", "k2": "", "horizontal_angle": "_h", "vertical_angle": "_v"}
-# Half-span for a magnet the archiver file does not cover, as in `score._span`.
-FALLBACK_SPAN = {"k1": 3.0, "k2": 50.0, "horizontal_angle": 5e-4, "vertical_angle": 5e-4}
+PROPERTY_SUFFIX = {"k1": "", "k2": "", "horizontal_angle": "_h", "vertical_angle": "_v",
+                   "angle": ""}
+# Half-span for a magnet nothing can give a range for, as in `score._span`.
+FALLBACK_SPAN = {"k1": 3.0, "k2": 50.0, "horizontal_angle": 5e-4,
+                 "vertical_angle": 5e-4, "angle": 0.1}
+# What essentially every CLARA magnet can be driven to, whatever six months of
+# operation happened to use.
+MAGNET_CURRENT_LIMIT = 100.0  # A
+
+# The VBC chicane: four dipoles on one setting, alternating in sign, and the largest
+# bend it is configured for. The lattice file ships it flat.
+VBC_CHICANE = "cla_vbc_chicane"
+VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
+               "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
+VBC_SIGNS = (1.0, -1.0, -1.0, 1.0)
+VBC_MAX_ANGLE = 0.12  # rad
 
 # ---- how far one episode's machine is from the next, at a variation of 1 ---- #
 
@@ -98,6 +119,7 @@ MAGNET_ERROR_FLOOR = {
     "k2": 1e-2,
     "horizontal_angle": 1e-5,
     "vertical_angle": 1e-5,
+    "angle": 1e-5,
 }
 # Set point errors an operating range has to hold, so the machine never starts
 # outside the range the agent is allowed to work in.
@@ -242,6 +264,11 @@ class XsuiteTransport(Transport):
             target.knl[0] = -value
         elif prop == "vertical_angle":
             target.ksl[0] = value
+        elif prop == "angle":
+            # Setting `angle` moves the reference curvature but leaves the field
+            # behind, so k0 has to follow it, as `xsuite_model._dipole` sets it.
+            target.angle = value
+            target.k0 = value / float(target.length) if float(target.length) else 0.0
         else:
             setattr(target, prop, value)
 
@@ -278,6 +305,50 @@ class XsuiteTransport(Transport):
             yield (stop, *self._ordered(particles, count))
 
 
+@lru_cache(maxsize=1)
+def _lattice_utils():
+    """`data/clara/lattice_data/utils.py`, the current-to-strength calibration.
+
+    Loaded by path rather than imported: `utils` is too common a name to put on the
+    import path of everything that uses this environment.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "clara_lattice_utils", LATTICE_UTILS_PY
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _current_range(element: str, prop: str, amps: float) -> tuple[float, float] | None:
+    """What +-`amps` reaches, in the lattice file's units, or None where `utils.py`
+    has no calibration — the sextupoles, and anything not on CLARA's magnet list.
+
+    The momentum is `utils.beam_energy`, a fixed figure per section. That table puts
+    S02 at 32.8 MeV where the nominal model has 35.8, so S02 strengths carry about
+    9 % more range than they should (`nominal_model/README.md` raises the same point).
+    """
+    utils = _lattice_utils()
+    momentum = utils.beam_energy.get(element.split("_")[1])
+    if momentum is None:
+        return None
+    name = element.upper().replace("_", "-")
+    if prop == "k1":
+        convert = utils.quadrupole_k_from_current
+    elif prop == "angle":
+        convert = utils.dipole_angle_from_current
+    elif prop in ("horizontal_angle", "vertical_angle"):
+        name = name.replace("HVCOR", "HCOR" if prop.startswith("h") else "VCOR")
+        convert = utils.corrector_angle_from_current
+    else:
+        return None
+    try:
+        low, high = sorted(convert(name, sign * amps, momentum) for sign in (-1, 1))
+    except KeyError:
+        return None
+    return low, high
+
+
 def _setpoint_error_rms(prop: str, nominal: float) -> float:
     """How far from its asked-for strength a magnet sits, at a variation of 1."""
     return MAGNET_ERROR_RELATIVE * abs(nominal) + MAGNET_ERROR_FLOOR[prop]
@@ -312,6 +383,9 @@ class Knob:
     transport: Transport
     low: float
     high: float
+    # Elements driven off the same setting, each with its sign — the four dipoles
+    # of the VBC chicane are one knob on the machine, not four.
+    coupled: tuple[tuple[str, float], ...] = ()
 
     @property
     def value(self) -> float:
@@ -324,6 +398,8 @@ class Knob:
         if clip:
             value = float(np.clip(value, self.low, self.high))
         self.transport.write(self.element_name, self.prop, value)
+        for element, sign in self.coupled:
+            self.transport.write(element, self.prop, sign * value)
         return self.value
 
 
@@ -413,6 +489,7 @@ class SimEnv(BaseAcceleratorEnv):
         }
         self.misalignments = dict(self._nominal_shifts)
         self.beam_offset = np.zeros(6)
+        self.shot_offset = np.zeros(6)
         # Where each diagnostic's centre is this episode, its own offset included.
         self._offsets = {
             name: np.array(diagnostic.misalignment)
@@ -507,15 +584,19 @@ class SimEnv(BaseAcceleratorEnv):
                     high=np.inf,
                 )
                 # Its range needs the strength it starts at, so it is set second.
-                knob.low, knob.high = (
-                    (float(overrides[name][0]), float(overrides[name][1]))
-                    if name in overrides
-                    else self._operating_range(
-                        ranges.get(element.name, {}).get(prop), prop, knob.value
-                    )
+                knob.low, knob.high = self._limits(
+                    name, element.name, prop, knob.value, ranges, overrides
                 )
                 knobs[name] = knob
                 self._error_rms[name] = _setpoint_error_rms(prop, knob.value)
+
+        if self.config.include_vbc_chicane and all(
+            name in {e.name for e in segment.elements} for name in VBC_DIPOLES
+        ):
+            knobs[VBC_CHICANE] = self._vbc_chicane(ranges, overrides)
+            self._error_rms[VBC_CHICANE] = _setpoint_error_rms(
+                "angle", knobs[VBC_CHICANE].value
+            )
         missing = set(wanted or ()) - set(knobs)
         if missing:
             raise KeyError(
@@ -525,26 +606,56 @@ class SimEnv(BaseAcceleratorEnv):
         self._controllable = list(wanted) if wanted is not None else list(knobs)
         return knobs
 
-    @staticmethod
-    def _operating_range(archived, prop: str, nominal: float) -> tuple[float, float]:
-        """What a magnet may be set to: what it ran between over six months of CLARA
-        operation, where `magnet_ranges.json` has it.
+    def _vbc_chicane(self, ranges, overrides) -> Knob:
+        """The VBC as one knob: four dipoles on one setting, alternating in sign.
 
-        Widened to hold the strength the lattice file carries, which is sometimes
-        outside the archived percentiles and, for the FEA arc quadrupoles, outside an
-        archived range of [0, 0] — they were never powered in that period. Clipping
-        those to the archiver would throw away the tune the model starts from. The
-        margin is the set point error an episode can start with, so the machine is
-        never handed over sitting outside the range it may be tuned in.
+        Powering it compresses the bunch, which is the only handle in this line on
+        the energy spread at the readout — but a dipole angle is not in
+        `score.TUNABLE`, so a tune that uses it fails the benchmark's validation.
         """
-        low, high = (
-            (float(archived[0]), float(archived[1]))
-            if archived is not None
-            else (-FALLBACK_SPAN[prop], FALLBACK_SPAN[prop])
+        knob = Knob(
+            name=VBC_CHICANE,
+            element_name=VBC_DIPOLES[0],
+            prop="angle",
+            transport=self.transport,
+            low=-VBC_MAX_ANGLE,
+            high=VBC_MAX_ANGLE,
+            coupled=tuple(zip(VBC_DIPOLES[1:], VBC_SIGNS[1:])),
         )
+        low, high = self._limits(
+            VBC_CHICANE, VBC_DIPOLES[0], "angle", knob.value, ranges, overrides
+        )
+        knob.low, knob.high = max(low, -VBC_MAX_ANGLE), min(high, VBC_MAX_ANGLE)
+        return knob
+
+    def _limits(self, name, element, prop, nominal, ranges, overrides):
+        """What a magnet may be set to.
+
+        `config.magnet_range_source` chooses where the range comes from: "current",
+        what +-`config.magnet_current_limit` amps reaches through the calibration in
+        `data/clara/lattice_data/utils.py`, which is what the magnets can physically
+        do; or "archiver", the 0.5 to 99.5 percentiles of six months of operation in
+        `magnet_ranges.json`, which is only where they happened to run. The archiver
+        is far narrower — it has the FEA arc quadrupoles at [0, 0], never powered —
+        and will pin an optimiser long before the hardware does.
+
+        Either way the range is widened to hold the strength the lattice file
+        carries, plus the set point error an episode can start with, so the machine
+        is never handed over sitting outside the range it may be tuned in.
+        """
+        if name in overrides:
+            return float(overrides[name][0]), float(overrides[name][1])
+        base = None
+        if self.config.magnet_range_source == "current":
+            base = _current_range(element, prop, self.config.magnet_current_limit)
+        archived = ranges.get(element, {}).get(prop)
+        if base is None and archived is not None:
+            base = (float(archived[0]), float(archived[1]))
+        if base is None:
+            base = (-FALLBACK_SPAN[prop], FALLBACK_SPAN[prop])
         margin = SETPOINT_HEADROOM * _setpoint_error_rms(prop, nominal)
-        low, high = min(low, nominal - margin), max(high, nominal + margin)
-        if high == low:  # archived at a single value, and parked there
+        low, high = min(base[0], nominal - margin), max(base[1], nominal + margin)
+        if high == low:
             low, high = nominal - FALLBACK_SPAN[prop], nominal + FALLBACK_SPAN[prop]
         return low, high
 
@@ -593,28 +704,40 @@ class SimEnv(BaseAcceleratorEnv):
 
     # ---------- the machine this episode was dealt ----------
 
-    def _draw_beam(self) -> np.ndarray:
-        """A beam of its own size, shape and position, from the measured one."""
-        variation = self.config.beam_variation
-        self.beam_offset = np.zeros(6)
-        if not variation:
-            return self._reference_coordinates
+    def _perturb_beam(self, coordinates, variation: float):
+        """A beam of its own size, shape and position, from the one given.
 
-        coordinates = self._reference_coordinates - self._reference_coordinates.mean(
-            axis=0
-        )
+        Each plane gets an rms size factor and a mismatch factor — size against
+        divergence at constant emittance — and the whole beam an offset in all six
+        coordinates. Returns the beam and the offset it was given.
+        """
+        if not variation:
+            return coordinates, np.zeros(6)
+
+        centre = coordinates.mean(axis=0)
+        drawn = coordinates - centre
         for position, momentum in ((0, 1), (2, 3)):  # x-x', then y-y'
             size = _spread(self._rng, SIGMA_SPREAD, variation)
             mismatch = _spread(self._rng, BETA_SPREAD, variation)
-            coordinates[:, position] *= size * mismatch
-            coordinates[:, momentum] *= size / mismatch
+            drawn[:, position] *= size * mismatch
+            drawn[:, momentum] *= size / mismatch
         for column in (4, 5):  # bunch length and energy spread
-            coordinates[:, column] *= _spread(self._rng, SIGMA_SPREAD, variation)
+            drawn[:, column] *= _spread(self._rng, SIGMA_SPREAD, variation)
+        offset = self._rng.uniform(-CENTROID_JITTER, CENTROID_JITTER) * variation
+        return drawn + centre + offset, offset
 
-        self.beam_offset = (
-            self._rng.uniform(-CENTROID_JITTER, CENTROID_JITTER) * variation
+    @property
+    def shot_variation(self) -> float:
+        """How far one shot is from the next, against how far one episode's beam is
+        from another's."""
+        return self.config.beam_variation * self.config.beam_jitter
+
+    def _draw_beam(self) -> np.ndarray:
+        """The beam this episode was dealt, from the measured one."""
+        coordinates, self.beam_offset = self._perturb_beam(
+            self._reference_coordinates, self.config.beam_variation
         )
-        return coordinates + self._reference_coordinates.mean(axis=0) + self.beam_offset
+        return coordinates
 
     def _draw_setpoint(self) -> dict[str, float]:
         """Magnets near, but not on, the strengths the lattice file asks for."""
@@ -675,8 +798,14 @@ class SimEnv(BaseAcceleratorEnv):
     # ---------- tracking ----------
 
     def _simulate(self) -> None:
-        """Track the beam to the screen in the beam, reading every BPM on the way."""
-        count = len(self._coordinates)
+        """Track the beam to the screen in the beam, reading every BPM on the way.
+
+        Every call is a shot of its own: the episode's beam, jittered again.
+        """
+        shot, self.shot_offset = self._perturb_beam(
+            self._coordinates, self.shot_variation
+        )
+        count = len(shot)
         minimum = self.config.min_screen_fraction * count
         radius = self.config.beam_pipe_radius
 
@@ -693,7 +822,7 @@ class SimEnv(BaseAcceleratorEnv):
 
         # Everything past the screen is in its shadow: a screen in the beam stops it.
         stops = [stop.name for stop in self._stops if stop.index <= screen.index]
-        for name, x, y, alive in self.transport.run(self._coordinates, stops):
+        for name, x, y, alive in self.transport.run(shot, stops):
             live &= alive
             if radius is not None:
                 live &= x**2 + y**2 <= radius**2  # scraped on the beam pipe
