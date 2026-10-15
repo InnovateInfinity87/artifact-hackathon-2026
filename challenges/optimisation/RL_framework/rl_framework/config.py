@@ -72,6 +72,11 @@ class RLConfig:
     # Beam pipe the particles have to stay inside; a particle that leaves it stops
     # counting towards every reading further down the line. None removes the pipe.
     beam_pipe_radius: float | None = 50e-3
+    # The machine's vacuum chamber (`data/clara/lattice_data/apertures.json`, from
+    # STFC's SimFrame model of CLARA FEBE), checked along the whole line by both
+    # backends: a 17 mm half-aperture pipe, the linac irises, the TDC and the FEBE
+    # arc dipole chambers. False leaves only `beam_pipe_radius`.
+    apertures: bool = True
     # Fraction of the launched beam a diagnostic needs for its reading to count.
     min_screen_fraction: float = 0.10
     # Gaussian noise added to each BPM reading, in metres.
