@@ -57,8 +57,37 @@ at["J"]      # readout (mu_x, mu_y, sigma_x, sigma_y, T)  x  DOF
 - **Table.** Built at every node of the VBC-on grid after the final-focus re-match,
   in the error-free first-order model: `k1`, `readout`, `clipped`, `feasible`
   (T >= 95 % and both sizes within 5 %), `relative_error`.
-- **Rebuild.** `python -m MFopt.responses --workers 4` from `challenges/optimisation`,
-  about 35 minutes on 4 cores.
+- **Twin.** The error-free twin tracks 5,000 particles (`OpticsEnv(twin_particles=...)`),
+  half of the environment's 10,000, which keeps the rms sizes to about 1 %.
+- **Rebuild.** `python -m MFopt.responses --workers 16` from `challenges/optimisation`,
+  about 3 minutes on 16 cores. 118 of the 144 nodes are feasible, including every
+  node in the benchmark's 80 to 400 um range except 0.1 x 0.1 mm.
 
 Stage A steering (`steering.py`) reads the orbit and spot responses from this table
 instead of tracking them per episode.
+
+## Running episodes: `run_baselines.py`
+
+```bash
+python -m MFopt.run_baselines --seeds 30 --workers 16
+python -m MFopt.run_baselines --misalignment 5 --seeds 12 --tag lost_beam --policies optics_and_steering mfbo
+```
+
+One process per episode. Policies: `do_nothing`, `optics_only`, `optics_and_steering`
+(stage A) and `mfbo` (stage A, then MF-BO in `mfbo.py`). `--misalignment 5` gives
+days on which the beam is lost part way along the line; stage A then threads it
+(`steering.thread`). Results go to `MFopt/results/<policy>[_<tag>].json`. MF-BO needs
+`botorch`.
+
+## Results (15 Oct, VBC 131.7 mrad, 5k-particle twin table)
+
+| Days | Policy | Mean score | Median | Within 10 % | Within 25 % | Steps |
+|---|---|---|---|---|---|---|
+| 30 default (seeds 1000-1029) | do nothing | 9.37 | 10.00 | 0 % | 0 % | 0 |
+| | optics only | 6.50 | 6.22 | 0 % | 0 % | 1 |
+| | stage A | 0.49 | 0.38 | 30 % | 73 % | 4.6 |
+| | stage A + MF-BO | 0.32 | 0.25 | 77 % | 97 % | 10.2 |
+| 12 lost-beam (misalignment x5, seeds 1000-1011) | stage A | 0.48 | 0.43 | 33 % | 83 % | 7.2 |
+| | stage A + MF-BO | 0.37 | 0.30 | 75 % | 92 % | 13.2 |
+
+Every episode ends within 50 steps (longest 32) with the beam on the screen.

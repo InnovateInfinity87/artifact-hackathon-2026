@@ -46,7 +46,9 @@ QUAD_REACH = 0.5  # ln(sigma) a quadrupole's half-range moves, at most
 TRANSMISSION_WEIGHT = 2.0
 SAMPLES = 128
 CANDIDATES = 4096
-torch.set_default_dtype(torch.float64)
+# GPs in double precision, set per tensor: the tracking in the same process is
+# float32, so the global default dtype stays as it is.
+DTYPE = torch.float64
 
 
 def step_cost(steps: int) -> float:
@@ -55,8 +57,8 @@ def step_cost(steps: int) -> float:
 
 
 def _fit(x: np.ndarray, y: np.ndarray, noise: float | None = None) -> SingleTaskGP:
-    X = torch.as_tensor(x)
-    Y = torch.as_tensor(y).reshape(-1, 1)
+    X = torch.as_tensor(x, dtype=DTYPE)
+    Y = torch.as_tensor(y, dtype=DTYPE).reshape(-1, 1)
     kwargs = {}
     if noise is not None:
         kwargs["train_Yvar"] = torch.full_like(Y, noise**2)
@@ -78,8 +80,8 @@ class Discrepancy:
     def __call__(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.gp is None:
             n = X.shape[0]
-            return (torch.full((n,), self.offset),
-                    torch.full((n,), self.noise**2))
+            return (torch.full((n,), self.offset, dtype=DTYPE),
+                    torch.full((n,), self.noise**2, dtype=DTYPE))
         p = self.gp.posterior(X)
         return p.mean.squeeze(-1) + self.offset, p.variance.squeeze(-1)
 
@@ -140,7 +142,7 @@ class SpotBO:
 
     def _posterior(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Mean and sd of the machine's five readouts at the points x."""
-        X = torch.as_tensor(np.atleast_2d(x))
+        X = torch.as_tensor(np.atleast_2d(x), dtype=DTYPE)
         mean, var = [], []
         with torch.no_grad():
             for i, low in enumerate(self.low):
@@ -190,7 +192,7 @@ class SpotBO:
         ok = np.all(np.isfinite(y), axis=1)
         if not ok.any():
             return
-        low_mean = np.array([[low.posterior(torch.as_tensor(x[ok])).mean.squeeze(-1).detach().numpy()]
+        low_mean = np.array([[low.posterior(torch.as_tensor(x[ok], dtype=DTYPE)).mean.squeeze(-1).detach().numpy()]
                              for low in self.low]).squeeze(1).T
         delta = y[ok] - low_mean
         # shot jitter at the readout, roughly: 2 % of the size, 2 % of the spot in position

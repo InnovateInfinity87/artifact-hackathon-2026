@@ -87,6 +87,9 @@ READOUT_WEIGHT = 0.5
 # Finite-difference steps: k1 in m^-2, corrector kicks in rad.
 QUAD_STEP = 0.05
 CORRECTOR_STEP = 2e-5
+# Particles the error-free twin tracks: half of the environment's 10,000, which
+# keeps rms sizes to about 1 % and halves the cost of every response.
+TWIN_PARTICLES = 5_000
 
 
 @dataclass
@@ -139,8 +142,10 @@ class TargetOptics:
 class OpticsEnv(SimEnv):
     """`SimEnv` with `optics_for_target`. Episodes behave exactly as in `SimEnv`."""
 
-    def __init__(self, config: RLConfig | None = None):
+    def __init__(self, config: RLConfig | None = None,
+                 twin_particles: int | None = TWIN_PARTICLES):
         super().__init__(config or RLConfig())
+        self.twin_particles = twin_particles
         self.nodes = RematchedNodes()
         self._size_modes = SizeModes()
         self._twin: SimEnv | None = None
@@ -151,13 +156,15 @@ class OpticsEnv(SimEnv):
     @property
     def twin(self) -> SimEnv:
         """An error-free copy of this environment: the nominal beam, no survey
-        error and no shot jitter, with the same lattice, backend and apertures."""
+        error and no shot jitter, with the same lattice, backend and apertures,
+        tracking `twin_particles` particles."""
         if self._twin is None:
             config = RLConfig(**{**self.config.__dict__,
                                  "beam_variation": 0.0,
                                  "misalignment_variation": 0.0,
                                  "power_supply_ripple": 0.0,
-                                 "bpm_noise": 0.0})
+                                 "bpm_noise": 0.0,
+                                 "num_particles": self.twin_particles})
             self._twin = SimEnv(config)
             self._twin.reset(seed=0)
         return self._twin
@@ -235,7 +242,7 @@ class OpticsEnv(SimEnv):
     def _modes(self, k1, knob_names, step, columns_of, fraction) -> Modes:
         """Weighted central-difference response of the readings to each knob."""
         base = self._probe(k1)
-        screens, weights = self._rows(base["names"])
+        _, weights = self._rows(base["names"])
         rows = [f"{name}:{plane}" for name, w in zip(base["names"], weights) if w
                 for plane in ("x", "y")]
         columns = []
