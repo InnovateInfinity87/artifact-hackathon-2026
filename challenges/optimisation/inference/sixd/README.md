@@ -217,3 +217,37 @@ What did not work, kept for the record: a Gaussian fit to image second moments a
 - Getting the transverse chi2 to the noise level so the chirp scan picks the right minimum: more resampling stages and a larger sample are the next things to try, then a joint chirp and slice-spread scan.
 
 Reproduce: `python run_acquire.py` (images, about 6 min), `python observe_start.py && python analyse_start.py`, `python run_ment.py` (about 2.5 h on 4 cores), `python make_figures_start.py`. Set `XSUITE_ALLOW_KERNEL_COMPILATION=1` when the `xsuite` package (prebuilt kernels) is not installed; the first build in each process compiles kernels for 3 to 5 minutes, and `common.py` shares them between lines in a process.
+
+## Fast reconstruction on fitted maps, and the minimum image set (cloud session, 15 October)
+
+Every xsuite re-tracking in the reconstruction is replaced by fitted polynomial transfer
+maps (`surrogate.py`): one map per (config, screen) from the S02 start to the screen, fitted
+once from a tracked Gaussian training sample, before any image is used. Two sets are used:
+order 4 on the broad prior (early stages) and order 5 on half that width (all particles
+within 4 training sigma). Against tracking of the true beam the narrow maps are good to
+0.1 um median and 15 to 20 um on the spectrometer screen (pixels are 100 um after rebinning);
+only the nominal FEH screen is worse (140 um, 17 % of the beam inside). A stage then costs
+about 2 s instead of about 3 min. `fast_ment.py` runs the run_ment.py steps on the maps.
+
+The spectrometer setting (cla_fea_dia_scr_01) was re-optimised with all quads after S05
+free (`design_optics.refine_all`, tracked Nelder-Mead from the old setting): unstreaked y size
+0.16 mm against a 1.59 mm streak (was 0.95 against 1.29). The three FEA images were retaken
+(`reacquire.py`). This is what fixed the chirp sign.
+
+Results (true beam scoring only, single run each, reconstruction / truth):
+
+| images | set | time | core eps x | core eps y | eps4d ratio | sigma_z | sigma_delta | chirp |
+|---|---|---|---|---|---|---|---|---|
+| 68 | full plan | 233 s | 0.85 | 0.95 | 0.94 | 1.03 | 0.92 | 0.71 |
+| 55 | nominal optics on S02 to S05 screens only | 222 s | 0.87 | 0.94 | 0.87 | 1.05 | 0.93 | 0.72 |
+| 45 | two S02 quad settings | 206 s | 0.87 | 1.09 | 0.91 | 1.03 | 0.94 | 0.74 |
+| 39 | two streak screens (s07_02, dcp) | 186 s | 0.88 | 1.12 | 0.91 | 1.00 | 0.92 | 0.75 |
+| 24 | five transverse screens per setting | 161 s | 0.88 | 1.27 | 0.89 | 1.01 | 0.97 | 0.79 |
+| 21 | one streak screen (dcp) | 167 s | 1.12 | 1.24 | 0.95 | 1.08 | 0.96 | 0.75 |
+| 16 | one S02 setting | 157 s | 1.19 | 1.57 | 0.93 | 1.16 | 1.59 | 1.30 |
+
+39 images keep the quality of the full plan. Not recovered with any set: rms eps_x (about
+0.5, the 1 % halo outside the screens) and the slice energy spread / eps_z (about 4x): on the
+spectrometer x is set by the linac chirp (delta_S07 = 29 tau0) and the betatron size, and the
+1.3e-3 slice spread at S02 adds about 25 um, so it is not observable with these screens.
+Outputs: ment_results_fast.json, ment_results_lean1..6.json.

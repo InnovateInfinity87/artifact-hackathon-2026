@@ -116,10 +116,17 @@ class Maps:
         return cls([tuple(k.split("|")) for k in d["keys"]], d["coef"], d["exps"], d["loss_radius"])
 
 
-def fit(line, configs, n_train=60_000, order=ORDER, seed=11, workers=4, log=print):
+def fit(line, configs, n_train=60_000, order=ORDER, seed=11, workers=4, log=print, cov=None,
+        scale=1.0):
+    """Fit on a Gaussian training sample: diagonal SCALE * scale, or covariance `cov` (e.g.
+    1.5^2 times the current reconstruction's) when given; the maps are accurate where the
+    training sample is, which matters on the dispersive FEA screens."""
     t0 = time.time()
     rng = np.random.default_rng(seed)
-    z = rng.normal(0, 1, (n_train, 6)) * SCALE
+    if cov is None:
+        z = rng.normal(0, 1, (n_train, 6)) * SCALE * scale
+    else:
+        z = rng.multivariate_normal(np.zeros(6), cov, n_train)
     tracked = track_coords(line, z, configs, workers)
     log(f"tracked {n_train} training particles in {time.time() - t0:.0f} s")
     exps = exponents(order)
@@ -155,3 +162,34 @@ def validate(maps, line, configs, beam, log=print):
     for r in worst:
         log(r)
     return rows, tracked
+
+
+class CombinedMaps:
+    """Narrow, high-order maps inside their training domain (radius < `radius` in units of
+    their training rms), broad maps outside it (early MENT stages sample the broad prior)."""
+
+    def __init__(self, narrow, broad, narrow_scale, radius=4.0):
+        self.narrow, self.broad = narrow, broad
+        self.keys = narrow.keys
+        self.narrow_scale, self.radius = narrow_scale, radius
+
+    def indices(self, z, rng, keys=None):
+        keys = self.keys if keys is None else keys
+        inner = np.sqrt(((z / (SCALE * self.narrow_scale)) ** 2).sum(1)) < self.radius
+        a = self.narrow.indices(z[inner], rng, keys)
+        b = self.broad.indices(z[~inner], rng, keys) if (~inner).any() else {}
+        out = {}
+        for k in keys:
+            idx = np.empty(len(z), dtype=np.int32)
+            idx[inner] = a[k]
+            if (~inner).any():
+                idx[~inner] = b[k]
+            out[k] = idx
+        return out
+
+
+NARROW = dict(order=5, scale=0.5, path=common.HERE / "surrogate_maps_narrow.npz")
+
+
+def load_combined():
+    return CombinedMaps(Maps.load(NARROW["path"]), Maps.load(OUT), NARROW["scale"])
