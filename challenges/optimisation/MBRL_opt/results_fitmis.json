@@ -1,0 +1,18 @@
+[
+ {
+  "method": "mbrl",
+  "score": 0.774128384849741,
+  "score_median": 0.5831306996838848,
+  "mismatch": 0.4744813258837737,
+  "shots": 25.75,
+  "delivered": 1.0,
+  "transmission": 0.9550125,
+  "orbit_um": 2151.75991077633,
+  "optics_mismatch": 7.320196251658809,
+  "hit_50": 0.875,
+  "hit_25": 0.875,
+  "hit_10": 0.25,
+  "seconds": 674.7804448604584,
+  "episodes": 8
+ }
+]

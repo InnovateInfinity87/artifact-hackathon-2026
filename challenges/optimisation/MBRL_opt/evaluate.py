@@ -29,6 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "RL_framework"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rl_framework.config import RLConfig  # noqa: E402
 
@@ -62,14 +63,21 @@ def _worker_init(config, particles, variation, misalignment) -> None:
     )
 
 
-def _worker_run(task):
-    """One (method, seed) episode, as a plain dictionary the parent can collect."""
-    name, seed = task
+def _run(name, seed):
     if name == "mbrl":
-        result = _WORKER["agent"].run(_WORKER["env"], seed=seed)
-    else:
-        result = BASELINES[name](_WORKER["env"], _WORKER["twin"], _WORKER["config"], seed=seed)
-    return name, seed, result
+        return _WORKER["agent"].run(_WORKER["env"], seed=seed)
+    return BASELINES[name](_WORKER["env"], _WORKER["twin"], _WORKER["config"], seed=seed)
+
+
+def _worker_run(task):
+    """Every method on one seed, so they share the episode's optics lookup.
+
+    The lookup costs about forty seconds of model time per requested spot and is
+    cached per target on the environment, so running all the methods for a seed in
+    one process pays for it once instead of once each.
+    """
+    seed, methods = task
+    return seed, [(name, _run(name, seed)) for name in methods]
 
 
 def build(config: MBRLConfig, particles: int, variation: float, misalignment: float):
@@ -175,7 +183,7 @@ def main() -> None:
         raise SystemExit(f"{unknown}: not methods. mbrl, {', '.join(BASELINES)}")
 
     settings = (config, args.particles, args.beam_variation, args.misalignment_variation)
-    tasks = [(name, seed) for name in methods for seed in seeds]
+    tasks = [(seed, methods) for seed in seeds]
     collected: dict[str, list] = {name: [] for name in methods}
     start_times = {name: time.time() for name in methods}
     done = 0
@@ -189,29 +197,33 @@ def main() -> None:
         with mp.get_context("spawn").Pool(
             args.workers, initializer=_worker_init, initargs=settings
         ) as pool:
-            for name, seed, result in pool.imap_unordered(_worker_run, tasks):
-                collected[name].append(result)
+            for seed, results in pool.imap_unordered(_worker_run, tasks):
                 done += 1
-                print(
-                    f"  {name:<14} {done:>3}/{len(tasks)}  seed {seed}  "
-                    f"score {result.benchmark_score:7.3f}  shots {result.shots:>3}",
-                    flush=True,
-                )
+                for name, result in results:
+                    collected[name].append(result)
+                    print(
+                        f"  {name:<15} seed {seed} ({done:>2}/{len(tasks)})  "
+                        f"score {result.benchmark_score:7.3f}  shots {result.shots:>3}",
+                        flush=True,
+                    )
     else:
         env, twin = build(*settings)
         agent = MBRLAgent(config, twin)
-        for name, seed in tasks:
-            if name == "mbrl":
-                result = agent.run(env, seed=seed, verbose=args.verbose)
-            else:
-                result = BASELINES[name](env, twin, config, seed=seed)
-            collected[name].append(result)
+        _WORKER.update(config=config, env=env, twin=twin, agent=agent)
+        for seed, names in tasks:
             done += 1
-            print(
-                f"  {name:<14} {done:>3}/{len(tasks)}  seed {seed}  "
-                f"score {result.benchmark_score:7.3f}  shots {result.shots:>3}",
-                flush=True,
-            )
+            for name in names:
+                result = (
+                    agent.run(env, seed=seed, verbose=args.verbose)
+                    if name == "mbrl"
+                    else BASELINES[name](env, twin, config, seed=seed)
+                )
+                collected[name].append(result)
+                print(
+                    f"  {name:<15} seed {seed} ({done:>2}/{len(tasks)})  "
+                    f"score {result.benchmark_score:7.3f}  shots {result.shots:>3}",
+                    flush=True,
+                )
 
     elapsed = time.time() - min(start_times.values())
     rows = [

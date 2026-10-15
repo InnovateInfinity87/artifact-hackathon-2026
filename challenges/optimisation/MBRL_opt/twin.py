@@ -43,7 +43,12 @@ import numpy as np
 import torch
 
 CHALLENGE_DIR = Path(__file__).resolve().parents[1]
-LATTICE_JSON = CHALLENGE_DIR / "RL_framework" / "FEBE_full.json"
+# The lattice SimEnv tracks. `RL_framework/FEBE_full.json` is a second copy of the
+# same machine and was identical to this one until the VBC was turned on, at which
+# point only this one was updated and a twin reading the other disagreed with the
+# environment by a millimetre and a half at the readout. The twin reads whatever the
+# environment reads; there is no version of this that is worth a stale copy.
+LATTICE_JSON = CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "CLARA_cheetah.json"
 DISTRIBUTION_NPZ = CHALLENGE_DIR / "nominal_model" / "initial_distribution.npz"
 
 LATTICE_START = "cla_s02_sim_aper_01"
@@ -71,6 +76,16 @@ VBC_CHICANE = "cla_vbc_chicane"
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
                "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 VBC_SIGNS = (1.0, -1.0, -1.0, 1.0)
+# Which face of each VBC dipole turns with its angle, as `sim_env.VBC_EDGE` and
+# `score.VBC_EDGE`: the chicane's outer faces stay square to the beamline and the
+# inner ones follow the bend. Setting the angle without the face is a different
+# magnet — the edge focusing is what the vertical plane sees.
+VBC_EDGE = {
+    "cla_vbc_mag_dip_01": "dipole_e2",
+    "cla_vbc_mag_dip_02": "dipole_e1",
+    "cla_vbc_mag_dip_03": "dipole_e2",
+    "cla_vbc_mag_dip_04": "dipole_e1",
+}
 
 # The machine SimEnv models, repeated here because the twin has to agree with it about
 # what a reading is. `sim_env` and `RLConfig` carry the same numbers.
@@ -499,6 +514,7 @@ class CheetahTwin:
         if element == VBC_CHICANE:
             for dipole, sign in zip(VBC_DIPOLES, VBC_SIGNS):
                 setattr(self._elements[dipole], prop, sign * value)
+                setattr(self._elements[dipole], VBC_EDGE[dipole], sign * value)
             return
         setattr(self._elements[element], prop, value)
 

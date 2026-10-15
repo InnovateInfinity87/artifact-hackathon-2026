@@ -1,171 +1,201 @@
-# MBRL_opt — model-based RL tuning of CLARA
+# MBRL_opt — the model-based RL stage of the tuning pipeline
 
-A tuning agent for the `RL_framework` `SimEnv`. It does what an operator does: steers
-the beam down the line on the BPMs with the correctors, then shapes and places the spot
-on the FEBE hutch screen with the final quadrupoles, the sextupoles, the RF cavity
-phases, the VBC chicane and the last correctors.
+Getting a `SimEnv` episode — a new day on CLARA, with its own beam, its own survey
+error and a request for a spot at `cla_feh_dia_scr_01` — onto that spot in around
+twenty-five shots.
 
-The "model" in model-based RL here is **a differentiable Cheetah twin of CLARA**, not a
-learned network. The lattice is known — `RL_framework/FEBE_full.json`, which is the same
-file SimEnv tracks — so nothing about the machine's *structure* has to be learned. What
-is unknown is the particular machine `reset()` dealt: how the beam was launched, how big
-it is, and where the magnets and diagnostics actually sit. Those are fitted from the
-shots the agent takes, by gradient descent straight through Cheetah.
+This is the last stage of the team pipeline and it sits on the other stages rather
+than replacing them: it takes the reference optics and the SVD control rankings from
+[`MFopt`](../MFopt) / [`optics_matching`](../optics_matching), and reads its beam with
+the screen measure from [`image_processing`](../image_processing). What is added here
+is the twin and the tweak.
 
 ```
-SimEnv  ── bpm_x, bpm_y, screen moments ─────────────────┐
-  ▲                                                      ▼
-  │                                   ┌──────────────────────────────────┐
-  │                                   │ system_id   fit the latent       │
-  │                                   │   beam offset, size, mismatch    │
-  │                                   │   (survey error, optional)       │
-  │                                   └──────────────┬───────────────────┘
-  │                                                  ▼
-  │                                   ┌──────────────────────────────────┐
-  │                                   │ twin  differentiable Cheetah     │
-  │                                   │   373 elements, batched, ~2 ms   │
-  │                                   └──────────────┬───────────────────┘
-  │                                                  ▼
-  │                                   ┌──────────────────────────────────┐
-  └── magnet settings ────────────────│ planner  SVD steer, CEM + Adam   │
-                                      │   anchored on the last reading   │
-                                      └──────────────────────────────────┘
+request (mu_x, mu_y, sigma_x, sigma_y)
+        │
+        ▼
+1. reference optics      MFopt.optics_for_target  ──  no shots, ~40 s of model time
+     46 quadrupole k1s that give the requested size
+        │                                                         1 shot to load
+        ▼
+2. steer                 SVD: correctors vs BPMs at that optics
+     leading corrector planes, response from the twin, inverted    1–4 shots
+        │
+        ▼
+3. coupled control set   SVD: leading quadrupoles + leading correctors
+     plus the final correctors, sextupoles, RF phases, chicane     no shots
+        │
+        ▼
+4. tweak the tune        differentiable Cheetah twin + CEM/Adam    ~20 shots
+     fit what the machine is, plan against it, re-read the camera
 ```
 
-## Why a physics twin rather than a learned one
+## Why it is shaped like this
 
-Three things fall out of it.
+**The lookup does most of the work, for free.** `optics_for_target` re-matches the
+final focus on an error-free copy of the model and hits the requested *size* to a
+fraction of a percent at 99 % transmission, without touching the machine. Stage 4
+therefore is not solving the tune — it is correcting the difference between the
+machine the optics were matched for and the one the episode dealt.
 
-**It is exact.** With every variation at zero the twin reproduces SimEnv's BPM orbit and
-screen moments to 0.0002 µm — float32 rounding. `smoke_test.py` asserts this, and it is
-the test the whole approach rests on.
+**The lookup matches size, not position.** The request also names a spot anywhere
+within 2 mm of the screen centre, which is about eight requested spot sizes and most
+of the score. That is what the final correctors in the focus set are for, and it is
+why the centroid SVD alone is not enough: it ranks `cla_feh_mag_hvcor_01/02` near the
+bottom precisely because they move nothing but the last screen, which is exactly the
+property wanted here.
 
-**It is fast, and batched.** Cheetah fuses linear transfer maps, so a full track of the
-373-element stretch costs a couple of milliseconds whether it carries 2,000 particles or
-10,000, and element parameters take a leading batch dimension — 128 candidate tunes
-evaluate in ~190 ms. CEM over a large population is affordable every single shot.
+**Steps are measured in effect, not in units.** Before the focus starts, one batched
+track gives the response of all four measured moments to every control knob, and a
+step is redefined as the move that changes the reading by half a requested spot
+(`trust_effect`). No fixed physical step works: 0.1 mrad is a large kick from a
+corrector near the injector and nothing from the one a metre before the screen — and
+it is the second that has to carry the spot 2 mm. Before this was fixed the planner
+plateaued at a mismatch of 8 because it could not reach the requested position.
 
-**It is differentiable.** `d sigma_x / d k1` at the readout comes back from
-`backward()`, and so does the derivative with respect to a misalignment nobody measured.
-That is what makes both the system-identification fit and the final plan polish possible.
-
-The cost is one real shot per MPC step and no training at all. A policy-gradient method
-would need many thousands of episodes to learn physics that is already written down.
-
-## Running it
-
-```bash
-cd challenges/optimisation
-# one-off: the venv needs gymnasium, stable-baselines3, scikit-image, the xsuite
-# stack, and cheetah 0.8.4 (0.8.1 cannot parse the lattice JSON at all)
-uv pip install --python .venv/bin/python \
-  -r RL_framework/requirements.txt -r nominal_model/requirements.txt
-
-.venv/bin/python -I MBRL_opt/smoke_test.py                 # ~95 s, 20 checks
-.venv/bin/python -I MBRL_opt/evaluate.py --episodes 20
-.venv/bin/python -I MBRL_opt/evaluate.py --episodes 20 --fit-misalignments
-```
-
-`evaluate.py` runs every method over the same seeds — the seed fixes the beam, the
-survey error and the request — so a difference between two rows is a difference between
-two methods, not two machines. The headline is the mean of `info["benchmark_score"]`,
-which is `score.Report.calc_score` for one episode: the mismatch in requested spot sizes
-plus `EVAL_WEIGHT` per doubling of `EVAL_BUDGET` shots. Lower is better.
-
-## The files
-
-| File | What it is |
-|---|---|
-| `twin.py` | `CheetahTwin` and `LatentState`. The lattice, the beam, and a `readings()` that reproduces `SimEnv._track` and `_expose` exactly. The core of the whole thing. |
-| `system_id.py` | Fits `LatentState` to the episode's shots. The whole history goes through in one batched track. |
-| `planner.py` | Truncated-SVD orbit correction for the steering, CEM plus Adam for the focus. |
-| `agent.py` | `MBRLAgent`: the two stages, the shot budget, and the MPC loop. |
-| `knobs.py` | Which numbers a stage may turn, and the translation to and from SimEnv's names and ranges. |
-| `config.py` | `MBRLConfig`: the knob groups, budgets and solver settings. |
-| `baselines.py` | do-nothing, SVD-only steering, random search, on the same budget. |
-| `evaluate.py` | Runs everything over a set of episodes and prints the table. |
-| `smoke_test.py` | Twin fidelity, batching, gradients, and two real episodes. |
-
-## What it turns
-
-A deliberately small proof-of-concept set, 31 knobs of the 111 SimEnv offers. Every
-group is a list in `config.py`; widening is a one-line change.
-
-**Steering, 16 knobs** — both planes of eight correctors spread along the line
-(`cla_s02_mag_hvcor_01`/`_03`, `cla_s04_mag_hvcor_02`/`_05`, `cla_s07_mag_hvcor_03`/`_06`,
-`cla_fea_mag_hvcor_03`, `cla_feh_mag_hvcor_01`), against all 31 BPMs.
-
-**Focus, 17 knobs** — `cla_fea_mag_quad_13..16` and `cla_feh_mag_quad_01/02` (k1), both
-FEA sextupoles (k2), all four powered cavity phases, `cla_vbc_chicane`, and
-`cla_feh_mag_hvcor_01/02` both planes.
-
-The two correctors shared between the stages are one knob, not two.
-
-## Three things worth knowing
-
-**Anchor the planner on the measurement.** The planner never asks the twin where the
-beam is, only what *changes* if a knob moves:
+**The planner is anchored on the measurement.** It never asks the twin where the beam
+is, only what *changes* if a knob moves:
 
 ```
 predicted(delta) = measured + [twin(knobs + delta) − twin(knobs)]
 ```
 
-A model wrong by a constant still predicts the effect of moving a quadrupole perfectly,
-and anchoring cancels that constant exactly.
+A model wrong by a constant still predicts the effect of moving a quadrupole, and
+anchoring cancels the constant exactly.
 
-**Keep the trust region small.** That anchoring is exact for a small move and drifts for
-a large one. Measured over one episode: a trust region of 0.25 of each knob's span
-leaves the tune stuck at a mismatch of 13 and books a failed 10.2, while 0.08 walks it
-down to 4.1 and books 5.5. This is the single most important number in `config.py`.
+**The beam is read off the camera.** `screen.measure` wraps the measure written for
+the real CLARA captures, so the agent is driven by the same quantity in simulation as
+it would be on the machine. The benchmark still scores the particle moments; the agent
+never sees them.
 
-**Do not clip the planner's cost at the benchmark's scale.** The benchmark stops counting
-at ten requested spot sizes. An untuned machine sits at seventy or more — a 1.5 mm spot
-against an 85 µm request is eighteen spot sizes in size alone. A cost clipped at ten is
-perfectly flat across the entire region where the tuning happens, and both CEM and
-gradient descent see a plateau. `SimEnv._compute_reward` makes the same point about its
-own `MAX_MISMATCH`.
+## Running it
 
-A fourth, smaller one: whether a particle is inside the beam pipe is a step function, and
-half the beam is scraped in the FEA arc at the nominal tune, so the objective is a
-staircase with no slope. Blurring the wall outright is badly biased — at the true latent
-it moved the predicted loss from 0.00 to 114.7, and the fit walked away from the right
-answer chasing it. `twin._aperture` instead takes the *value* from the hard edge and the
-*gradient* from a sigmoid, which costs nothing and keeps both honest.
+```bash
+cd challenges/optimisation
+uv pip install --python .venv/bin/python \
+  -r RL_framework/requirements.txt -r nominal_model/requirements.txt
+
+.venv/bin/python -I MBRL_opt/smoke_test.py                      # ~2.5 min, 23 checks
+.venv/bin/python -I MBRL_opt/evaluate.py --episodes 8 --workers 8
+.venv/bin/python -I MBRL_opt/evaluate.py --episodes 8 --fit-misalignments
+```
+
+Episodes are independent and each pins itself to one thread, so `--workers` is close
+to linear. An episode is two to three minutes; most of it is the twin.
+
+## The files
+
+| File | What it is |
+|---|---|
+| `agent.py` | the four stages and the shot budget |
+| `twin.py` | `CheetahTwin`: the differentiable model, and `readings()` reproducing `SimEnv._track`/`_expose` exactly |
+| `system_id.py` | fits the beam (and optionally the survey error) to the episode's shots, through Cheetah |
+| `planner.py` | truncated-SVD steering, CEM + Adam focus, anchored on the last reading |
+| `knobs.py` | the control vector, its physical scales and its effect-calibrated steps |
+| `screen.py` | the robust camera measure, wrapping `image_processing` |
+| `config.py` | `MBRLConfig` |
+| `baselines.py` | the pipeline with its later stages removed |
+| `evaluate.py`, `smoke_test.py` | the comparison and the checks |
 
 ## Results
 
-Measured on this machine, CPU only, 10 episodes, seeds 1234–1243, at SimEnv's default
-difficulty (`beam_variation` 1.0, `misalignment_variation` 1.0, shot jitter on). Score is
-the mean `benchmark_score`; lower is better.
+Eight episodes, seeds 1234–1241, at SimEnv's defaults (`beam_variation` 1.0,
+`misalignment_variation` 1.0, shot jitter and the VBC on). Every method sees the same
+episodes. Score is the mean `info["benchmark_score"]`, which is
+`score.Report.calc_score` for one episode — mismatch in requested spot sizes, plus
+`TRANSMISSION_WEIGHT` for the bunch that never arrived, plus the shot cost. Lower is
+better. The hit columns are `score.HIT_TOLERANCES`: the fraction of episodes whose
+mean component error came inside 50 %, 25 % and 10 % of the requested spot.
 
-<!-- RESULTS -->
+| method | score | median | mismatch | shots | <50% | <25% | <10% |
+|---|---|---|---|---|---|---|---|
+| **full pipeline, survey error fitted** | **0.77** | **0.58** | 0.47 | 25.8 | 88 % | 88 % | 25 % |
+| full pipeline | 1.59 | 0.98 | 1.29 | 25.8 | 75 % | 62 % | 25 % |
+| optics + steering | 6.91 | 7.27 | 6.84 | 4.9 | 0 % | 0 % | 0 % |
+| reference optics only | 7.16 | 8.22 | 7.14 | 1.0 | 0 % | 0 % | 0 % |
+| do nothing | 9.97 | 10.00 | 9.97 | 0 | 0 % | 0 % | 0 % |
+
+Read down the table: the reference optics takes a failed episode to 7.2 in one shot,
+steering is worth a little more, and the model-based tweak does the rest — 6.9 to 1.6,
+with a median of 0.98 and a quarter of episodes landing inside a tenth of the
+requested spot. Every method delivers beam on every episode.
+
+The reference optics scoring 7.2 is not the lookup being wrong: on its own model it
+hits the requested size to a fraction of a percent. It is the cost of the request
+naming a *position* the matched family never matched for, plus the episode's own beam
+and survey error. That is precisely the gap stage 4 exists to close.
+
+**Fitting the survey error halves the score**, from 1.59 to 0.77, and takes the hit
+rate inside a quarter of the requested spot from 62 % to 88 %. It is still off by
+default, so the aligned twin is the baseline and this is an ablation you switch on
+with `--fit-misalignments`; on this evidence it should probably become the default. A
+misaligned quadrupole kicks and a misaligned sextupole focuses, and no amount of
+adjusting where the beam was launched imitates either.
+
+Reproduce with `evaluate.py --episodes 8 --seed 1234 --workers 8`, adding
+`--fit-misalignments` for the first row. Numbers are in `results.json` and
+`results_fitmis.json`.
+
+### Cost per episode
+
+Measured on seed 1234: 25 shots on the machine, 290,000 particle-tracks. The optics
+lookup spends 2.8 M on its own error-free twin, and the agent's twin spends 30.7 M
+across 611 calls — most of them batched, since a CEM iteration is 128 candidates in
+one call. The machine is about 1 % of the arithmetic, which is the whole point: a
+shot is the only thing that costs beam time.
+
+## Things worth knowing
+
+**The twin has to be the environment's own lattice.** It is built through
+`xsuite_model.cheetah_segment`, from `data/clara/lattice_data/CLARA_cheetah.json`,
+with apertures on — not from the copy at `RL_framework/FEBE_full.json`. The two were
+identical until the VBC was turned on and only one was updated; a twin on the stale
+copy disagreed with the machine by 1.5 mm at the readout and the planner spent the
+episode optimising a different accelerator. `smoke_test.py` holds the two to 0.0001 µm
+on an error-free machine, and that check is the one to run first after any change
+upstream.
+
+**Two aperture subtleties, both load-bearing.** Whether a particle is inside the beam
+pipe is a step function, and half the beam is scraped in the FEA arc, so the objective
+is a staircase with no slope. Blurring the wall is badly biased — at the true latent
+it moved the predicted loss from 0.00 to 114.7 and the fit walked away chasing it — so
+`twin._aperture` takes the *value* from the hard edge and the *gradient* from a
+sigmoid. And the 282 aperture elements break Cheetah's map fusion, which is why a
+track costs 90 ms rather than 37.
+
+**Batching is not free for these knobs.** A batch of candidate RF phases is a batch of
+different beam energies, so nothing downstream can be fused: at 128 candidates the six
+quadrupoles cost 287 ms and all seventeen knobs 1675 ms. A candidate is ~13 ms against
+~160 ms for a gradient step, so CEM still wins, but only enough to be worth running
+when the tune is stuck — hence `explore`.
+
+**Do not clip the planner's cost at the benchmark's scale.** The benchmark stops
+counting at ten requested spot sizes; an untuned machine sits at seventy. A cost
+clipped at ten is flat across the whole region where tuning happens.
 
 ## Limits, and what to try next
 
-**Reachability, not optimisation, is the binding constraint.** Given a twin that knows
-the machine exactly, the planner drives the mismatch from ~70 down to 1.3–6.4 and its
-prediction matches the delivered beam to within 1 % — so the planner is doing its job and
-17 focus knobs simply cannot hit every request. Matching `sigma_x` and `sigma_y`
-simultaneously is the hard part. **Widening `focus_quads` to more of the FEA arc is the
-first thing to try**, and it is one line in `config.py`.
+**The size residual is the binding constraint.** Position comes out to a few tens of
+microns, but when the episode's beam is vertically mismatched the readout `sigma_y`
+can end several times the request and the focus set cannot pull it back inside the
+budget. The most promising fix is to close the loop on stage 1: re-run
+`optics_for_target` against the beam the system identification has *fitted*, rather
+than the nominal beam it assumes, and reload. That is a second 40-second lookup and no
+extra shots.
 
-**Turn on the misalignment fit.** It is off by default so the aligned twin is the
-baseline, but on one episode it took the score from 5.5 to 3.1: a survey error does
-things no launch offset can imitate, since a misaligned quadrupole kicks and a misaligned
-sextupole focuses. `--fit-misalignments`.
+**The lookup sometimes misses.** On one of the two smoke-test seeds it returned optics
+21.8 % off the requested size in its own model, which caps what the tweak can do.
+That is `MFopt`'s to fix; `EpisodeResult.optics_error` reports it per episode.
 
-**Steering is nearly free and nearly useless here.** The nominal optics already deliver
-beam to the hutch with every BPM reading, so there is no beam to recover, and eight
-correctors cannot flatten an orbit driven by 46 misaligned quadrupoles read by BPMs with
-30 µm centring errors of their own — it bottoms out around 230 µm. The stage earns its
-place on a machine that has lost the beam, which is `score.py`'s setup rather than
-SimEnv's; `steering_patience` stops it wasting shots in the meantime.
+**Steering is nearly free and nearly useless here.** The reference optics already
+delivers beam with every BPM reading, so there is no beam to recover, and the orbit
+bottoms out around 550 µm rms — a handful of correctors against a survey error on 46
+quadrupoles. It would earn its place on a machine that had lost the beam.
 
-**The noise floor is real.** Every step redraws the beam at `beam_jitter` of
-`beam_variation`, which is about 8 % rms on a spot size and a few microns on a centroid.
-No amount of planning gets below it.
+**Turn the misalignment fit on.** It is off by default so the aligned twin is the
+baseline, but a survey error does things no launch offset can imitate.
+`--fit-misalignments`.
 
-**Not yet built: the Dyna layer.** The twin is a free simulator, so the natural next step
-is to randomise the latent, roll out inside the twin, and train a policy that proposes
-the first move — turning the ~37-shot MPC tune into a handful of shots plus a refinement.
-The MPC agent here is the thing that layer would warm-start, and it works standalone.
+**Not built: the Dyna layer.** The twin is a free simulator, so the natural next step
+is to randomise the latent, roll out inside it, and train a policy that proposes the
+first move — turning a twenty-shot MPC tweak into a few shots plus a refinement.

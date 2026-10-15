@@ -1,24 +1,29 @@
-"""Model-based RL tuning of CLARA against the `RL_framework` `SimEnv`.
+"""The model-based stage of the CLARA tuning pipeline, against `RL_framework`'s SimEnv.
 
-The model is a differentiable Cheetah twin of the machine rather than a learned
-network: the lattice is known, and only which particular machine this episode dealt
-has to be worked out, from the shots the agent takes. See `README.md`.
+Reference optics and SVD control rankings come from `MFopt`/`optics_matching`, the
+screen measure from `image_processing`; what is here is a differentiable Cheetah twin
+of the machine, a fit of the episode's beam onto it, and the planner that tweaks the
+reference tune until the camera agrees with the request. See `README.md`.
 
-    from MBRL_opt.agent import MBRLAgent, controllable_magnets
+    from MBRL_opt.agent import MBRLAgent
     from MBRL_opt.config import MBRLConfig
 """
 
+from agent import EpisodeResult, MBRLAgent
 from config import MBRLConfig
-from agent import EpisodeResult, MBRLAgent, controllable_magnets
+from knobs import KnobSet
+from screen import ScreenReading, measure
 from twin import CheetahTwin, LatentState, Readings, tune_threads
 
 __all__ = [
     "CheetahTwin",
     "EpisodeResult",
+    "KnobSet",
     "LatentState",
     "MBRLAgent",
     "MBRLConfig",
     "Readings",
-    "controllable_magnets",
+    "ScreenReading",
+    "measure",
     "tune_threads",
 ]
