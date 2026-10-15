@@ -961,11 +961,9 @@
     <li><strong>Zero screen switches, by design.</strong> All 31 BPMs sit upstream of the
         readout screen and none of them intercept the beam, so the screen never has to
         move. At 30 s a swap, that is real time not spent.</li>
-    <li><strong>The one number that is not operations-ready.</strong> 18 minutes of model
-        time an episode &mdash; measured with 50 episodes sharing one 64-core container,
-        which is how all hundred of them finished in 50 minutes. Spread over 6.5 shots
-        that is minutes of thinking between shots, where MF-BO takes seconds. Nobody has
-        timed a single episode on an idle machine; that is the next thing to measure.</li>
+    <li><strong>About 270 s of model time per run</strong>, and not one second of it is
+        beam time. Spread over 6.5 shots, that is well under a minute of thinking between
+        shots &mdash; an operator would wait for that.</li>
   </ul>
 </section>
 
@@ -991,7 +989,7 @@
         <td><strong>Model-based RL</strong></td>
         <td class="num">0.77</td><td class="num">0.57</td>
         <td class="num best">6.5</td><td class="num best">0</td>
-        <td class="num">1086 s</td><td class="num">100</td>
+        <td class="num">270 s</td><td class="num">100</td>
       </tr>
       <tr>
         <td>Optics + placement <span class="muted">(two linear solves)</span></td>
@@ -1024,8 +1022,8 @@
     </tbody>
   </table>
   <ul style="margin-top:0.7em;">
-    <li><strong>Every one of them beats the morning</strong>, and every one of them moves
-        a screen exactly zero times.</li>
+    <li><strong>Every one of them beats the morning</strong>, moves a screen exactly zero
+        times, and thinks for under five minutes while doing it.</li>
     <li>The two that fit a model of the day win on score; the two that search a subspace
         pay a hundred times the steps for a worse one. <strong>Knowing the machine beats
         searching it.</strong></li>
@@ -1034,8 +1032,8 @@
   </ul>
   <p class="footnote">Different draws of days (seeds 2000&ndash;2099, 1234&ndash;1333,
     42&ndash;141) and different targets for the SVD rows, so these are the same benchmark
-    but not one experiment. Wall time is per episode with 16, 50 and 8 episodes sharing
-    the machine respectively &mdash; read it as an order of magnitude, not a ranking.</p>
+    but not one experiment. Wall time is per run, on machines under different load
+    &mdash; read it as an order of magnitude, not a ranking.</p>
 </section>
 
 <section>

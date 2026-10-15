@@ -49,7 +49,9 @@ Figures used: `geometry/line_geometry_apertures_nominal_beam.png`, `transmission
 
 Numbers on the slides come from `MFopt/README.md` (the 100-day `calibrated_mfbo` run, seeds 2000-2099, and the 30-day paired ablation), `MBRL_opt/README.md` with `results_100.json` / `results_ablation.json` (100 episodes, seeds 1234-1333; the 12-episode ablation is where the steering result comes from), `model-svd_opt/VALIDATION.md` and `results/cheetah_100_episodes/metrics.json` (100 episodes, seeds 42-141), `section-opt/section_review.md` (the S04 method comparison), `inference/tomography/README.md` (the chi2/dof ladder) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
 
-`The big winners` is the one table that puts the methods together. They were measured on different draws of days and different budgets, so the slide says so in a footnote, and wall time is labelled as an order of magnitude rather than a ranking - the three runs had different parallel loads. If they are ever run as one experiment, drop the footnote.
+`The big winners` is the one table that puts the methods together. They were measured on different draws of days and different budgets, so the slide says so in a footnote, and wall time is labelled as an order of magnitude rather than a ranking - the runs were on machines under different load. If they are ever run as one experiment, drop the footnote.
+
+The MBRL wall time on the slides is **270 s per run**, from Amy, not the 1086 s in `results_100.json`: that field is per-episode wall measured with 50 episodes sharing one container, which is not what an operator would wait.
 
 ### Stills of the animation
 
