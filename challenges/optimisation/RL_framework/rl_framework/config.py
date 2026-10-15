@@ -82,9 +82,31 @@ class RLConfig:
     magnet_variation: float = 1.0
     misalignment_variation: float = 1.0
 
-    # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`, or
-    # `<corrector>_h` / `_v`). None gives it every magnet in the modelled stretch.
+    # Shot-to-shot jitter, as a fraction of `beam_variation`: within an episode the
+    # machine holds still, but every step draws its own beam around the episode's,
+    # so two identical actions do not give identical readings. Scales with
+    # `beam_variation`, so setting that to 0 leaves the environment deterministic.
+    beam_jitter: float = 0.1
+
+    # Where each magnet's operating range comes from. "current" is what
+    # +-`magnet_current_limit` amps reaches through the calibration in
+    # `data/clara/lattice_data/utils.py` — what the hardware can physically do.
+    # "archiver" is where the magnets happened to run over six months, from
+    # `magnet_ranges.json`; far narrower, and it has the FEA arc quadrupoles at
+    # [0, 0]. Magnets with no calibration (the sextupoles) fall back to the
+    # archiver either way.
+    magnet_range_source: str = "current"
+    magnet_current_limit: float = 100.0  # A
+
+    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 120 mrad.
+    # It is the only handle in this line on the energy spread at the readout.
+    # Careful: a dipole angle is not in `score.TUNABLE`, so a tune that moves it
+    # fails the benchmark's validation. Set False to keep the action space scorable.
+    include_vbc_chicane: bool = True
+
+    # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`,
+    # `<corrector>_h` / `_v`, or `cla_vbc_chicane`). None gives it every magnet in
+    # the modelled stretch.
     controllable_magnets: list[str] | None = None
-    # {knob name: [low, high]} overriding the archiver ranges in
-    # `data/clara/lattice_data/magnet_ranges.json`.
+    # {knob name: [low, high]} overriding the ranges worked out above.
     magnet_limits: dict[str, list[float]] | None = None
