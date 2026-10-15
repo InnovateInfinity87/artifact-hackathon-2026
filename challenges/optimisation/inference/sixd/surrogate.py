@@ -100,8 +100,8 @@ def aperture_checks(aperture_line, configs, sample, workers=4):
                 continue
             element = name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0]
             limit = xl[name]
-            if type(limit).__name__ == "LimitEllipse":
-                out.append((element, "ellipse", float(limit.a), float(limit.b)))
+            if hasattr(limit, "a_squ"):
+                out.append((element, "ellipse", float(limit.a_squ) ** 0.5, float(limit.b_squ) ** 0.5))
             else:
                 out.append((element, "rect", float(limit.max_x), float(limit.max_y)))
         checks[config.name] = out
