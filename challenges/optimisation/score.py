@@ -27,6 +27,12 @@ and hand it over::
 you hand back, measures at `CLA-FEH-DIA-SCR-01` (the FEBE hutch screen, s = 67.93 m,
 just ahead of the IP) and reports how close you got.
 
+**Beam that does not arrive counts against you.** The score charges
+`TRANSMISSION_WEIGHT` for the fraction of the bunch that never reaches the readout,
+so a tight spot bought by scraping the rest of the beam off the pipe is not a good
+tune. The lattice-file optics already loses about half the bunch, so there is room
+to win here as well as to lose.
+
 **You always have something to work from.** A set point is only used if the beam is
 still visible on at least the first three diagnostic screens. Past those it is usually
 lost, and recovering it is the job. All 28 screens are yours to measure — the score
@@ -96,10 +102,22 @@ TUNABLE = {  # what a tuner may change, by element type
 }
 # A dipole angle is the geometry of the machine rather than a tune, so dipoles are
 # not tunable by type. The VBC is the exception: it is a *variable* bunch
-# compressor, set like any other knob, up to 120 mrad.
+# compressor, set like any other knob. The lattice file runs it at 131.7 mrad,
+# R56 = -57.6 mm, the maximum compression into FEBE measured on CLARA (IPAC
+# THP2100); the SimEnv knob goes up to 135 mrad, R56 = -60.5 mm.
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
                "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 TUNABLE_BY_NAME = {name: ("angle",) for name in VBC_DIPOLES}
+# The VBC is a chicane of rectangular magnets with their outer faces square to the
+# straight beamline (STFC's SimFrame VBC.yaml), so each dipole's inner face is
+# turned by its own bend angle. Setting an angle sets that edge with it: without
+# the edge focusing the chicane is a different, much more lossy optic.
+VBC_EDGE = {
+    "cla_vbc_mag_dip_01": "dipole_e2",
+    "cla_vbc_mag_dip_02": "dipole_e1",
+    "cla_vbc_mag_dip_03": "dipole_e2",
+    "cla_vbc_mag_dip_04": "dipole_e1",
+}
 
 
 def tunable_properties(element) -> tuple:
@@ -121,6 +139,11 @@ _PENALTY_UM = 1e4  # booked against a case that fails, loses the beam, or errors
 # accident of micrometres and call counts sharing a plus sign.
 MU_WEIGHT = 1.0
 SIGMA_WEIGHT = 1.0
+# Beam that does not arrive is beam the experiment does not get. Costed against the
+# whole launched bunch, so delivering half of it is worth a spot size — the same as
+# missing the requested size by 100%. Without this nothing asks a tuner to keep the
+# beam, and a tight spot bought by scraping the rest off the pipe scores perfectly.
+TRANSMISSION_WEIGHT = 2.0
 EVAL_WEIGHT = 0.5
 EVAL_BUDGET = 50.0  # calls per case costing EVAL_WEIGHT; each doubling costs another
 FAILURE_SCORE = 10.0  # what a lost beam or an invalid segment books, in spot sizes
@@ -229,6 +252,12 @@ def apply_tune(segment, tune: dict) -> None:
         for element in elements:
             for prop, value in properties.items():
                 setattr(element, prop, torch.tensor(float(value), dtype=torch.float32))
+                if prop == "angle" and name in VBC_EDGE:
+                    setattr(
+                        element,
+                        VBC_EDGE[name],
+                        torch.tensor(float(value), dtype=torch.float32),
+                    )
 
 
 def read_tune(segment) -> dict:
@@ -773,9 +802,10 @@ class Report:
         """What each case contributes to `calc_score`, in requested spot sizes.
 
         A case is judged against the spot it was asked for, so a tight request counts
-        for as much as a loose one. Contributions are clipped at `FAILURE_SCORE`, which
-        is also what a failed case books — so losing the beam is never cheaper than
-        delivering a bad one, and one disastrous case cannot swamp the other ninety-nine.
+        for as much as a loose one, and against how much of the bunch it delivered
+        there. Contributions are clipped at `FAILURE_SCORE`, which is also what a
+        failed case books — so losing the beam is never cheaper than delivering a bad
+        one, and one disastrous case cannot swamp the other ninety-nine.
         """
         scores = []
         for case in self.cases:
@@ -783,10 +813,12 @@ class Report:
                 scores.append(FAILURE_SCORE)
                 continue
             error = np.abs(case.achieved - case.target) / float(case.target[2:].mean())
+            survival = case.survival if np.isfinite(case.survival) else 0.0
             scores.append(
                 min(
                     MU_WEIGHT * (error[0] + error[1]) / 2
-                    + SIGMA_WEIGHT * (error[2] + error[3]) / 2,
+                    + SIGMA_WEIGHT * (error[2] + error[3]) / 2
+                    + TRANSMISSION_WEIGHT * (1.0 - survival),
                     FAILURE_SCORE,
                 )
             )
@@ -795,8 +827,8 @@ class Report:
     def calc_score(self) -> float:
         """One number for the leaderboard, lower is better. Dimensionless.
 
-        Mean per-case error in units of the requested spot size, plus `EVAL_WEIGHT` for
-        every doubling of the evaluation budget — beam time costs order of magnitude,
+        Mean per-case error in units of the requested spot size, the beam that did not
+        arrive, plus `EVAL_WEIGHT` for every doubling of the evaluation budget — beam time costs order of magnitude,
         not increments, so 40 to 80 calls is priced like 2000 to 4000.
         """
         if not self.cases:

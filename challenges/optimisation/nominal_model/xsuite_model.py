@@ -18,6 +18,7 @@ Element mapping (Cheetah -> xsuite):
   ponderomotive focusing acts at each particle's own energy.
 - TransverseDeflectingCavity with zero voltage -> Drift (the only case in the CLARA file)
 - Screen, Marker -> Marker
+- Aperture -> LimitRect or LimitEllipse (only present with `apertures=True`)
 
 Distributions are stored in Cheetah's convention (x, px, y, py, tau, delta) with
 tau = -zeta; px and py are canonical momenta normalised to the reference momentum.
@@ -31,6 +32,7 @@ exactly.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +40,7 @@ from typing import ClassVar
 
 import cheetah
 import numpy as np
+import torch
 import xobjects as xo
 import xtrack as xt
 
@@ -46,6 +49,8 @@ CHALLENGE_DIR = HERE.parent
 # Nominal magnet settings: the strengths stored in the lattice file.
 LATTICE_JSON = CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "CLARA_cheetah.json"
 # Magnet settings of the 2026-03-23 S07 quadrupole scan (built by make_gpsr_lattice.py).
+# Vacuum chambers of the line, from STFC's SimFrame model of CLARA FEBE (see the file).
+APERTURES_JSON = CHALLENGE_DIR / "data" / "clara" / "lattice_data" / "apertures.json"
 GPSR_LATTICE_JSON = HERE / "CLARA_cheetah_S07_GPSR.json"
 INITIAL_DISTRIBUTION = HERE / "initial_distribution.npz"
 START = "cla_s02_sim_aper_01"  # the benchmark start, score.LATTICE_START
@@ -281,6 +286,8 @@ def _convert_element(element, energy_ev: float) -> tuple[list, float]:
         converted = xt.Drift(length=float(element.length))
     elif isinstance(element, (cheetah.Screen, cheetah.Marker)):
         converted = xt.Marker()
+    elif isinstance(element, cheetah.Aperture):
+        converted = _aperture(element)
     else:
         raise NotImplementedError(
             f"{name}: no xsuite mapping for {type(element).__name__}"
@@ -288,11 +295,81 @@ def _convert_element(element, energy_ev: float) -> tuple[list, float]:
     return [(name, converted)], energy_ev
 
 
-def cheetah_segment(
-    lattice_json: str | Path = LATTICE_JSON, start: str = START, end: str = READOUT
+def _aperture(element: cheetah.Aperture):
+    """xsuite limit for a Cheetah aperture; an inactive one is a marker."""
+    if not element.is_active:
+        return xt.Marker()
+    x_max, y_max = float(element.x_max), float(element.y_max)
+    if element.shape == "elliptical":
+        return xt.LimitEllipse(a=x_max, b=y_max)
+    return xt.LimitRect(min_x=-x_max, max_x=x_max, min_y=-y_max, max_y=y_max)
+
+
+def load_apertures(path: str | Path = APERTURES_JSON) -> dict:
+    """The aperture table: `pipe` and `collimators` entries keyed by element name."""
+    with open(path) as handle:
+        table = json.load(handle)
+    return {
+        kind: {entry["element"]: entry for entry in table[kind]}
+        for kind in ("pipe", "collimators")
+    }
+
+
+def _aperture_element(entry: dict, name: str, dtype: torch.dtype) -> cheetah.Aperture:
+    return cheetah.Aperture(
+        x_max=torch.tensor(entry["x_max"], dtype=dtype),
+        y_max=torch.tensor(entry["y_max"], dtype=dtype),
+        shape=entry["shape"],
+        name=name,
+    )
+
+
+def with_apertures(
+    segment: cheetah.Segment, apertures: dict | None = None
 ) -> cheetah.Segment:
-    """The Cheetah segment after `start` (excluded) up to `end` (included)."""
+    """The segment with its vacuum chamber added as thin Cheetah apertures.
+
+    A `pipe` entry sets the chamber from its element onwards: the beam is checked
+    there and at the exit of every element with a length until the next entry.
+    SimFrame applies its aperture markers at the marker only; extending each one
+    to the next is our reading of them as the chamber of that section. A `collimator` entry is checked at the entrance and
+    exit of its own element. Apertures are named `<element>_pipe`, `<element>_col_in`
+    and `<element>_col_out` and stay on the design axis when magnets are misaligned.
+    """
+    apertures = load_apertures() if apertures is None else apertures
+    pipe, collimators = apertures["pipe"], apertures["collimators"]
+    dtype = torch.get_default_dtype()
+    elements, chamber = [], None
+    for element in segment.elements:
+        name = element.name
+        collimator = collimators.get(name)
+        if collimator is not None:
+            elements.append(_aperture_element(collimator, f"{name}_col_in", dtype))
+        elements.append(element)
+        if name in pipe:
+            chamber = pipe[name]
+            elements.append(_aperture_element(chamber, f"{name}_pipe", dtype))
+        elif collimator is not None:
+            elements.append(_aperture_element(collimator, f"{name}_col_out", dtype))
+        elif chamber is not None and float(getattr(element, "length", 0.0)) > 0.0:
+            elements.append(_aperture_element(chamber, f"{name}_pipe", dtype))
+    return cheetah.Segment(elements, name=segment.name)
+
+
+def cheetah_segment(
+    lattice_json: str | Path = LATTICE_JSON,
+    start: str = START,
+    end: str = READOUT,
+    apertures: bool = False,
+) -> cheetah.Segment:
+    """The Cheetah segment after `start` (excluded) up to `end` (included).
+
+    With `apertures`, the vacuum chamber of `APERTURES_JSON` is added (`with_apertures`);
+    the chamber at `start` comes along as the first element.
+    """
     full_line = cheetah.Segment.from_lattice_json(str(lattice_json))
+    if apertures:
+        full_line = with_apertures(full_line)
     after_start = full_line.partition_at(start, mode="after")[-1]
     return after_start.partition_at(end, mode="after")[0]
 
@@ -302,12 +379,14 @@ def build_line(
     lattice_json: str | Path = LATTICE_JSON,
     start: str = START,
     end: str = READOUT,
+    apertures: bool = False,
 ) -> ConvertedLine:
     """xsuite line from `start` to `end` with the magnet settings of `lattice_json`, for a
-    reference particle of `initial_energy_ev` total energy at `start`."""
+    reference particle of `initial_energy_ev` total energy at `start`. With `apertures`
+    the line carries the vacuum chamber and loses particles on it."""
     names, elements, boundaries = [], [], []
     energy = initial_energy_ev
-    for element in cheetah_segment(lattice_json, start, end).elements:
+    for element in cheetah_segment(lattice_json, start, end, apertures).elements:
         pieces, energy = _convert_element(element, energy)
         for piece_name, piece in pieces:
             names.append(piece_name)

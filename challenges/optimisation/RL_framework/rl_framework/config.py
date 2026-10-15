@@ -72,6 +72,11 @@ class RLConfig:
     # Beam pipe the particles have to stay inside; a particle that leaves it stops
     # counting towards every reading further down the line. None removes the pipe.
     beam_pipe_radius: float | None = 50e-3
+    # The machine's vacuum chamber (`data/clara/lattice_data/apertures.json`, from
+    # STFC's SimFrame model of CLARA FEBE), checked along the whole line by both
+    # backends: a 17 mm half-aperture pipe, the linac irises, the TDC and the FEBE
+    # arc dipole chambers. False leaves only `beam_pipe_radius`.
+    apertures: bool = True
     # Fraction of the launched beam a diagnostic needs for its reading to count.
     min_screen_fraction: float = 0.10
     # Gaussian noise added to each BPM reading, in metres.
@@ -133,7 +138,7 @@ class RLConfig:
     include_cavity_phases: bool = True
     cavity_phase_range: float = 30.0  # degrees either side of nominal
 
-    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 120 mrad.
+    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 135 mrad.
     # With the cavity phases, it is the handle on the energy spread at the readout.
     # `score.TUNABLE_BY_NAME` allows the four VBC angles, so a tune that moves them
     # is scorable; every other dipole in the line is geometry and stays fixed.
