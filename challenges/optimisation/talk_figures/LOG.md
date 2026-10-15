@@ -193,3 +193,11 @@ python3 -I scripts/make_anim_frames.py --theme dark --fps 12
 - A single nominal beam is used, with no errors or jitter, so these are ideal transmissions.
 - The transmission matrix (final transmission per node) belongs to the "Optics nodes transmission map" thread. The end points of these curves should agree with it when that thread also uses second-order tracking.
 - The "Optics nodes transmission map" thread uses a slightly different second-order setup: dipole edges are also second order (`second_order_edge`), correctors stay linear, and it tracks 50k particles (`CLARA_cheetah_second_order.json`, in the project files of that study). The two setups agree within statistics: nominal VBC on is 0.5870 there and 0.5871 here, and node (0,0) is 0.98 in both.
+
+## MFopt episode workflow
+
+`mfopt/mfopt_workflow.svg` shows one `SimEnv` episode from `reset` to the benchmark score, as `MFopt/run_baselines.py --policies mfbo` runs it. Purple boxes cost no step: they run in the error-free Cheetah twin. Blue and teal boxes are machine shots, one step each. Stage A loads the target optics, threads the beam when it is lost, then steers the orbit and the centroid. Stage D (MF-BO) treats the twin as the low fidelity and the machine as the high fidelity, and stops when the expected improvement is worth less than one more step.
+
+Key numbers (30 default days, seeds 1000-1029): stage A scores a mean of 0.49, with 30 % of days within 10 %, in about 5 steps. Stage A plus MF-BO scores 0.30 to 0.32, with 73 to 80 % within 10 %, in about 9 steps.
+
+Slide message: the model does most of the work for free, and the machine is spent only on what the model gets wrong.
