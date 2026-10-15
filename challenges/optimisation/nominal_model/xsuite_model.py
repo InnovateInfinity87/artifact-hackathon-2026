@@ -329,9 +329,10 @@ def with_apertures(
 ) -> cheetah.Segment:
     """The segment with its vacuum chamber added as thin Cheetah apertures.
 
-    A `pipe` entry sets the chamber from its element onwards, as SimFrame's aperture
-    markers do: the beam is checked there and at the exit of every element with a
-    length until the next entry. A `collimator` entry is checked at the entrance and
+    A `pipe` entry sets the chamber from its element onwards: the beam is checked
+    there and at the exit of every element with a length until the next entry.
+    SimFrame applies its aperture markers at the marker only; extending each one
+    to the next is our reading of them as the chamber of that section. A `collimator` entry is checked at the entrance and
     exit of its own element. Apertures are named `<element>_pipe`, `<element>_col_in`
     and `<element>_col_out` and stay on the design axis when magnets are misaligned.
     """

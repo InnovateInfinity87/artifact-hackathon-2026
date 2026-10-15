@@ -1,10 +1,10 @@
 {
- "description": "Vacuum apertures of the CLARA FEBE line, as half sizes in metres. 'pipe' entries set the chamber from that element onwards, until the next 'pipe' entry. 'collimators' apply at the entrance and exit of the named element only.",
+ "description": "Vacuum apertures of the CLARA FEBE line, as half sizes in metres. 'pipe' entries set the chamber from that element onwards, until the next 'pipe' entry (our reading of SimFrame's point-like aperture markers, which SimFrame itself applies only at the marker). 'collimators' apply at the entrance and exit of the named element only.",
  "source": {
   "file": "https://github.com/astec-stfc/simframe/blob/b2967d3ba1b48f5e14a208e16e8bd9633fd55ef9/tests/CLARA/FEBE_2_Bunches.yaml",
   "cross_check": "https://github.com/astec-stfc/masterlattice/tree/96514fd276eef73988b07db69d45609d7ee4a45f/MasterLattice/YAML (clara400_v13_FEBE.def sections): identical values wherever both define an element",
   "convention": "SimFrame horizontal_size / vertical_size, written to ELEGANT as x_max / y_max (half apertures)",
-  "paper": "E. W. Snedden et al., Phys. Rev. Accel. Beams 27, 041602 (2024) has no aperture table. It quotes a ~68 mm radius for the four quadrupoles around FEC1 (cla_feh_mag_quad_01/02 are in this line), wider than the 17 mm pipe kept here, and a 20 mm horizontal aperture for the FEC2 spectrometer, which is beyond the readout screen"
+  "paper": "E. W. Snedden et al., Phys. Rev. Accel. Beams 27, 041602 (2024) has no aperture table. Its ~68 mm radius for the four quadrupoles around FEC1 is used from cla_feh_mag_quad_01 to the readout; its 20 mm FEC2 spectrometer aperture is beyond the readout; the 5 mm tungsten mask in the FEBE arc is not modelled"
  },
  "pipe": [
   {
@@ -162,6 +162,13 @@
    "x_max": 0.017,
    "y_max": 0.017,
    "shape": "rectangular"
+  },
+  {
+   "element": "cla_feh_mag_quad_01",
+   "x_max": 0.068,
+   "y_max": 0.068,
+   "shape": "elliptical",
+   "source": "PRAB 27, 041602: the four quadrupoles around FEC1 have a ~68 mm radius"
   }
  ],
  "collimators": [
@@ -181,6 +188,7 @@
  "notes": [
   "Only the TDC (5 mm), the X-band linearizer L4H (4.12 mm) and the S-band linacs (10 mm) are tighter than the 17 mm pipe.",
   "cla_s07_sim_aper_02/03 follow SimFrame's S07A section (horizontally open, 17 mm vertical); the S070/S07X variants of the same markers are 17 x 17 mm.",
-  "SimFrame models every chamber as rectangular; the 'open' collimators are retracted (1 m) and not modelled."
+  "SimFrame models every chamber as rectangular; the 'open' collimators are retracted (1 m) and not modelled.",
+  "The chamber is checked at element ends only, not inside quadrupoles or cavities."
  ]
 }
