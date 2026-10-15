@@ -1,4 +1,6 @@
 import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
 # --------------------------------------------------
 # Configuration
@@ -77,6 +79,48 @@ variation_columns = [
     f"{metric}_variation_pct"
     for metric in ["cx", "cy", "sx", "sy"]
 ]
+
+# --------------------------------------------------
+# Plot histograms
+# --------------------------------------------------
+
+output_image = "variation_histograms_log.png"
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+axes = axes.flatten()
+
+for ax, metric, col in zip(axes, metrics, variation_columns):
+    values = summary[col].replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+
+    # Logarithmic axes cannot display zero or negative values.
+    values = values[values > 0]
+
+    ax.hist(
+        values,
+        bins=np.logspace(-1, 3, 60),
+        color="steelblue",
+        edgecolor="white",
+        alpha=0.85,
+    )
+
+    ax.set_xscale("log")
+    # ax.set_xlim(0.1, 1000)
+
+    ax.set_title(f"{metric} variation")
+    ax.set_xlabel("Variation (%) — logarithmic scale")
+    ax.set_ylabel("Number of names")
+    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="x", which="both", alpha=0.15)
+
+fig.suptitle(
+    "Percentage variation across captures (logarithmic scale)",
+    fontsize=14,
+)
+fig.tight_layout()
+fig.savefig(output_image, dpi=180, bbox_inches="tight")
+plt.close(fig)
 
 # Keep names where any metric is below the threshold.
 mask = (

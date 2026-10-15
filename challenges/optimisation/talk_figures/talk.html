@@ -380,6 +380,26 @@
   </div>
 </section>
 
+<!-- ------------------------------------------------------------- segment optimisation -->
+<section id="segment-optimisation">
+  <h2>Comparison and applicaiton of different optimization methods</h2>
+  <h3>Different methods applied to a sigle section</h3>
+  <figure>
+    <img src="segment_opt/comparison.png"
+         style="width:auto; max-width:100%; height:300px; margin:0 auto;"
+         alt="S04 section 4 + 4 knobs: RM, full BO, RCDS and other methods: several initial beams scores and averaged scores">
+    <figcaption>Response matrix (RM), Bayesian optimisation (BO), RCDS and hybrid methods.</figcaption>
+  </figure>
+  <h3 style="margin-top:0.7em;">Response method applied segment-by-segment</h3>
+  <figure>
+    <img src="segment_opt/response.png"
+         style="width:auto; max-width:100%; height:300px; margin:0 auto;"
+         alt="Beam distributions before and after segment-by-segment response correction, alongside the design beam; survival is 64.5%, 77.8% and 58.5%, respectively">
+    <figcaption>Initial &rarr; corrected &rarr; design beam. Survival rises from
+      <strong>64.5% to 77.8%</strong> after correction.</figcaption>
+  </figure>
+</section>
+
 <section>
   <h2>6. Tweak the tune, one: multi-fidelity BO</h2>
   <div class="cols">
