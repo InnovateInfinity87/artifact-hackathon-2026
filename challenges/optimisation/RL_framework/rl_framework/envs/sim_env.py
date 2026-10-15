@@ -116,6 +116,14 @@ VBC_CHICANE = "cla_vbc_chicane"
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
                "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 VBC_SIGNS = (1.0, -1.0, -1.0, 1.0)
+# Which face of each VBC dipole turns with its angle, as `score.VBC_EDGE`: the
+# chicane's outer faces stay square to the beamline, the inner ones follow the bend.
+VBC_EDGE = {
+    "cla_vbc_mag_dip_01": "exit",
+    "cla_vbc_mag_dip_02": "entry",
+    "cla_vbc_mag_dip_03": "exit",
+    "cla_vbc_mag_dip_04": "entry",
+}
 VBC_MAX_ANGLE = 0.12  # rad
 
 # ---- how far one episode's machine is from the next, at a variation of 1 ---- #
@@ -238,6 +246,9 @@ class CheetahTransport(Transport):
 
     def write(self, element: str, prop: str, value: float) -> None:
         setattr(self._elements[element], prop, torch.tensor(value, dtype=DTYPE))
+        if prop == "angle" and element in VBC_EDGE:
+            face = "dipole_e2" if VBC_EDGE[element] == "exit" else "dipole_e1"
+            setattr(self._elements[element], face, torch.tensor(value, dtype=DTYPE))
 
     def read_shift(self, element: str) -> tuple[float, float]:
         misalignment = self._elements[element].misalignment
@@ -354,6 +365,8 @@ class XsuiteTransport(Transport):
             # behind, so k0 has to follow it, as `xsuite_model._dipole` sets it.
             target.angle = value
             target.k0 = value / float(target.length) if float(target.length) else 0.0
+            if element in VBC_EDGE:
+                setattr(target, f"edge_{VBC_EDGE[element]}_angle", value)
         else:
             setattr(target, prop, value)
 

@@ -106,6 +106,16 @@ TUNABLE = {  # what a tuner may change, by element type
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
                "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 TUNABLE_BY_NAME = {name: ("angle",) for name in VBC_DIPOLES}
+# The VBC is a chicane of rectangular magnets with their outer faces square to the
+# straight beamline (STFC's SimFrame VBC.yaml), so each dipole's inner face is
+# turned by its own bend angle. Setting an angle sets that edge with it: without
+# the edge focusing the chicane is a different, much more lossy optic.
+VBC_EDGE = {
+    "cla_vbc_mag_dip_01": "dipole_e2",
+    "cla_vbc_mag_dip_02": "dipole_e1",
+    "cla_vbc_mag_dip_03": "dipole_e2",
+    "cla_vbc_mag_dip_04": "dipole_e1",
+}
 
 
 def tunable_properties(element) -> tuple:
@@ -240,6 +250,12 @@ def apply_tune(segment, tune: dict) -> None:
         for element in elements:
             for prop, value in properties.items():
                 setattr(element, prop, torch.tensor(float(value), dtype=torch.float32))
+                if prop == "angle" and name in VBC_EDGE:
+                    setattr(
+                        element,
+                        VBC_EDGE[name],
+                        torch.tensor(float(value), dtype=torch.float32),
+                    )
 
 
 def read_tune(segment) -> dict:
