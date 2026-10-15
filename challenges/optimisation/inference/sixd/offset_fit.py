@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 QUAD_PRIOR = 50e-6  # rms survey error the fit is pulled towards zero with
-LAUNCH_PRIOR = np.array([100e-6, 100e-6, 100e-6, 100e-6, 0.0, 3e-3])  # x px y py (zeta) delta
+LAUNCH_PRIOR = np.array([100e-6, 100e-6, 100e-6, 100e-6, 0.0, 1e-3])  # x px y py (zeta) delta
 LAUNCHED = [0, 1, 2, 3, 5]
 MIN_ON_CHIP = 0.97  # a clipped image's centroid depends on the beam's shape
 DIAG_PRIOR = 30e-6
@@ -94,7 +94,7 @@ def _predict(line, configs_by_name, keys, rows, beam, quads, params, geometry):
     return out, scraped
 
 
-def fit(line, configs, data, beam, quads, kicks=None, iterations=2, n_particles=2000, log=print):
+def fit(line, configs, data, beam, quads, kicks=None, iterations=1, n_particles=1000, log=print):
     """Fitted {quad: (dx, dy)}, launch (x, px, y, py, delta), diagnostic offsets {name: (dx, dy)}.
 
     `data` is an images file from simenv_acquire.acquire (BPM readings included), `beam`
