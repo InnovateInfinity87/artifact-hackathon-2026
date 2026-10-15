@@ -37,10 +37,14 @@ only looks at the IP, but nothing stops you steering your way down the line.
 that needs 10,000 simulator calls per beam would need 10,000 machine shots, so report
 the number honestly — it is the figure that costs beam time.
 
-**Only magnets may change.** The segment you return is checked: same elements in the
-same order, and only quadrupole `k1`, corrector angles and sextupole `k2` may differ.
-Anything else (drift lengths, cavity voltages, screen positions, misalignments) is a
-failed case.
+**Only the knobs may change.** The segment you return is checked: same elements in
+the same order, and only quadrupole `k1`, corrector angles, sextupole `k2`, cavity
+phases and the four VBC chicane angles may differ. Anything else (drift lengths,
+cavity voltages, the FEA dogleg angles, screen positions, misalignments) is a failed
+case. The RF phases and the chicane are real knobs on CLARA and the only handles on
+the energy spread, which is what the dogleg turns into horizontal beam size at the
+readout — but they move the mean energy too, so everything downstream of them has to
+be rematched.
 
 **Baselines to beat.** 
 `do_nothing_tuner` hands the bad set point straight back and never delivers beam, which
@@ -82,11 +86,29 @@ LATTICE_START = "cla_s02_sim_aper_01"
 # FEBE hutch screen, s = 67.93 m, just ahead of the IP. 
 READOUT_SCREEN = "cla_feh_dia_scr_01"
 
-TUNABLE = {  # what a tuner may change
+TUNABLE = {  # what a tuner may change, by element type
     cheetah.Quadrupole: ("k1",),
     cheetah.CombinedCorrector: ("horizontal_angle", "vertical_angle"),
     cheetah.Sextupole: ("k2",),
+    # RF phase sets the chirp, and so the energy spread the dogleg turns into beam
+    # size at the readout. Voltage and frequency stay fixed.
+    cheetah.Cavity: ("phase",),
 }
+# A dipole angle is the geometry of the machine rather than a tune, so dipoles are
+# not tunable by type. The VBC is the exception: it is a *variable* bunch
+# compressor, set like any other knob, up to 120 mrad.
+VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
+               "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
+TUNABLE_BY_NAME = {name: ("angle",) for name in VBC_DIPOLES}
+
+
+def tunable_properties(element) -> tuple:
+    """What a tuner may change on this element: what its type allows, plus anything
+    allowed to it by name."""
+    by_type = next(
+        (props for kind, props in TUNABLE.items() if isinstance(element, kind)), ()
+    )
+    return tuple(by_type) + TUNABLE_BY_NAME.get(element.name, ())
 TARGET_LABELS = ("mu_x", "mu_y", "sigma_x", "sigma_y")
 
 # A hit is a mean error within this fraction of the target spot size — scale-free, so a
@@ -214,8 +236,7 @@ def read_tune(segment) -> dict:
     return {
         element.name: {p: float(getattr(element, p)) for p in properties}
         for element in segment.elements
-        for kind, properties in TUNABLE.items()
-        if isinstance(element, kind)
+        if (properties := tunable_properties(element))
     }
 
 
@@ -621,9 +642,7 @@ def _fixed_features(segment) -> dict:
     """Everything a tuner is *not* allowed to touch, as rounded floats."""
     fixed = {}
     for index, element in enumerate(segment.elements):
-        allowed = next(
-            (props for kind, props in TUNABLE.items() if isinstance(element, kind)), ()
-        )
+        allowed = tunable_properties(element)
         for feature in element.defining_features:
             value = getattr(element, feature, None)
             if feature not in allowed and isinstance(value, torch.Tensor):
