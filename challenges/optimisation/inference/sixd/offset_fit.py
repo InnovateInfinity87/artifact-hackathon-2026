@@ -24,6 +24,10 @@ DIAG_PRIOR = 30e-6
 BPM_NOISE = 5e-6  # mean of 10 shots
 SCREEN_NOISE = 10e-6
 STEP = 20e-6
+# SimEnv's beam pipe: a particle once outside it no longer counts at any diagnostic
+# downstream. In the FEA optics a 0.25 % halo is scraped in S07, which moves the
+# centroids there by 150 um; readings after any scraping are left out of the fit.
+PIPE_RADIUS = 50e-3
 
 
 def _measurements(data, bpm_index):
@@ -59,6 +63,7 @@ def _predict(line, configs_by_name, keys, rows, beam, quads, params, geometry):
     launched = beam.copy()
     launched[:, LAUNCHED] += params[2 * n:2 * n + len(LAUNCHED)]
     out = np.zeros(len(rows))
+    scraped = np.zeros(len(rows))
     try:
         by_key = {}
         for r, (i, name, plane, _, _) in enumerate(rows):
@@ -66,12 +71,19 @@ def _predict(line, configs_by_name, keys, rows, beam, quads, params, geometry):
         for i, items in by_key.items():
             cname, screen = keys[i].split("|")
             full6d.apply_config(line, configs_by_name[cname])
-            stops = sorted({name for _, name, _ in items})
-            tracked = line.track_through(launched, stops, allow_losses=True)
+            last = line.element_index[screen]
+            stops = [d for d in line.line.element_names if ("_dia_bpm_" in d or "_dia_scr_" in d)
+                     and line.element_index[d] <= last]
+            tracked = line.track_through(launched, stops, allow_losses=False)
             line.restore_nominal_quads()
             full6d.set_rf_phases(line.line, {})
+            live, kept = np.ones(len(launched), bool), {}
+            for d in stops:
+                live &= np.hypot(tracked[d][:, 0], tracked[d][:, 2]) <= PIPE_RADIUS
+                kept[d] = live.copy()
             for r, name, plane in items:
-                c = tracked[name]
+                c = tracked[name][kept[name]]
+                scraped[r] = 1.0 - kept[name].mean()
                 if name == screen:
                     g = geometry[screen]
                     c = c[(c[:, 0] > g[0]) & (c[:, 0] < g[1]) & (c[:, 2] > g[2]) & (c[:, 2] < g[3])]
@@ -79,7 +91,7 @@ def _predict(line, configs_by_name, keys, rows, beam, quads, params, geometry):
     finally:
         for q in quads:
             line.line[q].shift_x, line.line[q].shift_y = 0.0, 0.0
-    return out
+    return out, scraped
 
 
 def fit(line, configs, data, beam, quads, kicks=None, iterations=2, n_particles=2000, log=print):
@@ -108,11 +120,14 @@ def fit(line, configs, data, beam, quads, kicks=None, iterations=2, n_particles=
         line.set_corrector(c, h, v)
     try:
         for it in range(iterations):
-            f0 = _predict(line, by_name, keys, rows, beam, quads, params, geometry)
+            f0, scraped = _predict(line, by_name, keys, rows, beam, quads, params, geometry)
+            if it == 0:
+                w = np.where(scraped > 0, 0.0, w)
+                log(f"offset fit: {int((scraped > 0).sum())} of {len(rows)} readings follow scraping, left out")
             J = np.zeros((len(rows), len(params)))
             for p in range(len(params)):
                 dp = params.copy(); dp[p] += STEP
-                J[:, p] = (_predict(line, by_name, keys, rows, beam, quads, dp, geometry) - f0) / STEP
+                J[:, p] = (_predict(line, by_name, keys, rows, beam, quads, dp, geometry)[0] - f0) / STEP
             A = np.hstack([J, D])
             x0 = np.concatenate([params, np.zeros(len(diags))])
             r0 = y - f0 + J @ params  # linear model y = f0 + J (p - params) + D d
@@ -121,7 +136,7 @@ def fit(line, configs, data, beam, quads, kicks=None, iterations=2, n_particles=
             sol = np.linalg.lstsq(M, b, rcond=None)[0]
             params = sol[:len(params)]
             resid = (y - f0 - J @ (params - x0[:len(params)]) - D @ sol[len(params):]) * w
-            log(f"offset fit iteration {it}: chi2/row {np.mean(resid ** 2):.2f}, rows {len(rows)}")
+            log(f"offset fit iteration {it}: chi2/row {np.sum(resid ** 2) / max(np.count_nonzero(w), 1):.2f}, rows {np.count_nonzero(w)}")
     finally:
         for c in kicks:
             line.set_corrector(c, 0.0, 0.0)
