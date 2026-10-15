@@ -59,7 +59,9 @@ class LineInventory:
         momentum_mevc_at = {
             name: float(p0c_along[index]) / 1e6 for name, index in converted.boundaries
         }
-        names = [name for name, _ in converted.boundaries]
+        # apertures (`<element>_pipe`, `_col_in`, `_col_out`) carry their element's name
+        names = [name for name, _ in converted.boundaries
+                 if not name.endswith(("_pipe", "_col_in", "_col_out"))]
         return cls(
             quads=[n for n in names if "_mag_quad_" in n],
             correctors=[n for n in names if "_mag_hvcor_" in n or "_mag_vcor_" in n],
