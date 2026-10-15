@@ -160,3 +160,24 @@ charge widths, peak current and skewness; see `data/compression_metadata.json`.
 The lookup and Cheetah adapter can be copied with this directory; the Xsuite
 factory additionally depends on `nominal_model/`. Reuse one `MatchedOptics`
 instance for repeated evaluations to cache the numerical bundles.
+
+## Symmetric target scan
+
+Run `python -m optics_matching.plot_symmetric_scan` to plot all 46 strengths
+against `sigma_x = sigma_y` from 0.1 to 20 mm (401 logarithmic samples).
+The PNG, PDF and numerical CSV are saved as
+`results/symmetric_target_strength_scan.*`; the lower panel shows the four
+varying final-focus magnets separately.
+
+## SVD modes versus both target sizes
+
+`from optics_matching import SizeModes` loads the 36 resolved quadrupole modes
+of the weighted fractional-beta response, parametrized by both target sizes.
+The 49×49 grid, compiled splines, dominant-variable examples and validations
+are described in [the 2D SVD report](results/size_svd/README.md).
+
+Use `SizeModes().evaluate(sigma_x_m, sigma_y_m)` for sorted values and
+orthonormal vectors. Keep its default analytic response refinement enabled;
+raw response splines are inaccurate near sharp focuses. Local sign transport
+and grouped projectors are supplied because verified degeneracies prevent a
+globally smooth individually sorted vector field across the whole domain.
