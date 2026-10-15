@@ -93,6 +93,75 @@ Figures for the CLARA hackathon talk, one section per figure: path (relative to 
 
 **Slide message:** The nominal optics lose beam in the middle of the line, while the matched nodes only lose it at the end.
 
+## 6. Transmission matrix of the optics nodes
+
+**Paths:**
+
+- `optics_nodes/transmission_matrix_vbc_on.png`
+- `optics_nodes/transmission_matrix_vbc_off.png`
+- `optics_nodes/transmission_matrix_design.png`
+
+**What it shows:** Final transmission (%) for each of the 144 nodes. x is the target σx and y is the target σy. The cell number is the transmission.
+
+**Settings:**
+
+- Model: as above, with 50k particles. Second-order tracking also uses second-order dipole edges.
+- Tools: `optics_matching_vbc_on/evaluate_nodes.py` and `plot_matrix.py`.
+- Cases:
+  - VBC on: 118.5 mrad, master.
+  - VBC off: knob set to 0.
+  - Design: Eiad's own anchor lattice, with the VBC off and L4H off.
+
+**Key numbers:**
+
+- VBC on: median 92.7%, minimum 17% at 20×20 mm.
+- VBC off: about 97% at almost every node, minimum 60%.
+- Design: about 97%, minimum 63%.
+- Nominal optics: 59% (VBC on) and 13% (VBC off).
+
+**Slide message:** Eiad's nodes fix transmission for the VBC-off machine they were matched for. With the VBC on, the large-spot nodes lose most of the beam.
+
+## 7. Rematched nodes with the VBC at the paper setting
+
+**Path:** `optics_nodes/rematch_vbc_on.png`
+
+**What it shows:** The VBC is at 131.7 mrad, which gives R56 = −57.6 mm. That is the measured maximum compression into FEBE (Jones et al., IPAC'26 THP2100). The left column is Eiad's nodes and the right column is the rematch. The top row is transmission and the bottom row is the worst-plane size error.
+
+**Settings:**
+
+- Eiad's 42-quad prefix is kept. The 30 quads after the VBC are refitted per node (L-BFGS, differentiable Cheetah, 3k particles).
+- Each node is then checked in `SimEnv` with 50k particles.
+- Script: `optics_matching_vbc_on/rematch.py`.
+- k1 table: `optics_matching_vbc_on/results/rematched_grid_vbc_on.npz`.
+
+**Key numbers:**
+
+| | Eiad's nodes | Rematch |
+|---|---|---|
+| Median transmission | 89% | 99% |
+| Median size error | 285% | 1.6% |
+
+- 96 of 144 nodes are at T ≥ 95% and within 5% of the target size.
+- The 12–20 mm corner still fails.
+- In the model, the FEBE arc R56 is +7.75 mm (paper: +7.7 mm).
+
+**Slide message:** A rematch downstream of the VBC recovers both the target sizes and about 99% transmission over most of the range.
+
+## 8. Quadrupole strengths vs target size (rematch)
+
+**Path:** `optics_nodes/quads_vs_target.png`
+
+**What it shows:** k1 of the 30 refitted quads against target size. Each panel shows the σx = σy diagonal, a σx scan at σy = 1.1 mm, a σy scan at σx = 1.1 mm, and Eiad's diagonal (dashed). The ±100 A range is shaded.
+
+**Key numbers:**
+
+- FEA Q15/Q16 and FEH Q1/Q2 still set the size, following Eiad's curves.
+- The VBC correction is mainly S06 Q01/Q02, with changes up to 2.6 m⁻², and FEH Q1.
+- The other quads jitter by a few tenths of a m⁻². They are degenerate.
+- FEA Q16 and FEH Q2 exceed ±100 A at large and small σ respectively.
+
+**Slide message:** Only a handful of magnets do the work.
+
 ## Caveats
 
 - These figures are Cheetah only. Francesco judged the difference from xsuite to be small, but it was not checked here.
