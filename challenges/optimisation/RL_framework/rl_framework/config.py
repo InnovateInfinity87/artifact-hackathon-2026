@@ -15,8 +15,12 @@ class RLConfig:
         "sigma_p": 0.01, "energy": 250e6, "total_charge": 10e-12,
     })
 
-    # Target diagnostic screen — reward minimises beam size here
-    target_screen: str = "cla_s04_dia_scr_03"
+    # The screen the request is for: where every episode starts with the screen in
+    # the beam, and the only screen an episode is scored on. The agent may move the
+    # screen elsewhere to look around, but that costs a shot and brings back no new
+    # reading of the request — the score holds at the last reading of this screen,
+    # as `score.py` measures only at its readout however many screens a tuner used.
+    target_screen: str = "cla_feh_dia_scr_01"
 
     # Magnets the RL agent can control.
     # Each entry: [name, min_native_value, max_native_value]
@@ -68,6 +72,11 @@ class RLConfig:
     # Beam pipe the particles have to stay inside; a particle that leaves it stops
     # counting towards every reading further down the line. None removes the pipe.
     beam_pipe_radius: float | None = 50e-3
+    # The machine's vacuum chamber (`data/clara/lattice_data/apertures.json`, from
+    # STFC's SimFrame model of CLARA FEBE), checked along the whole line by both
+    # backends: a 17 mm half-aperture pipe, the linac irises, the TDC and the FEBE
+    # arc dipole chambers. False leaves only `beam_pipe_radius`.
+    apertures: bool = True
     # Fraction of the launched beam a diagnostic needs for its reading to count.
     min_screen_fraction: float = 0.10
     # Gaussian noise added to each BPM reading, in metres.
@@ -77,14 +86,67 @@ class RLConfig:
     # on the spreads at the top of `sim_env.py`: 0 is the nominal model exactly, 1 is
     # the machine as it realistically differs shot to shot and day to day, and larger
     # values stay a harder version of the same problem rather than a different one.
-    # `reset()` draws a new beam, a new set point and a new survey error from them.
+    # `reset()` draws a new beam and a new survey error from them; the magnets
+    # always start at the strengths the lattice file asks for.
     beam_variation: float = 1.0
-    magnet_variation: float = 1.0
     misalignment_variation: float = 1.0
 
-    # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`, or
-    # `<corrector>_h` / `_v`). None gives it every magnet in the modelled stretch.
+    # What the beam is asked for at the observed screen: (mu_x, mu_y, sigma_x,
+    # sigma_y) in metres, off the screen's centre. None draws a new request every
+    # episode from the two lines below, as `score.sample_target` does; a 4-tuple
+    # fixes it. The reward is the error against it in units of the requested spot.
+    target: tuple[float, float, float, float] | None = None
+    requested_spot: tuple[float, float] = (80e-6, 400e-6)  # m, log-uniform
+    requested_offset: float = 2e-3  # m, uniform about the screen centre
+
+    # How that error becomes a reward. "log" keeps a gradient however far the beam
+    # is from the request; "linear" is the benchmark's own score, which stops
+    # counting at ten requested spot sizes and so is flat across most of the range
+    # an untuned machine sits in. `info["benchmark_score"]` is the benchmark's
+    # number either way.
+    reward_shape: str = "log"
+
+    # Shot-to-shot jitter, as a fraction of `beam_variation`: within an episode the
+    # machine holds still, but every step draws its own beam around the episode's,
+    # so two identical actions do not give identical readings. Scales with
+    # `beam_variation`, so setting that to 0 leaves the environment deterministic.
+    beam_jitter: float = 0.1
+
+    # Power supply ripple: how far a magnet's actual field sits from what it was
+    # set to, as a fraction of the setting, drawn fresh for every magnet on every
+    # step and undone once the shot has been tracked. 0.001 is 0.1%. At 0, the
+    # default, nothing is drawn, written or restored at all. Cavity phases are not
+    # rippled — RF stability is a different mechanism and a fraction of a phase
+    # means nothing.
+    power_supply_ripple: float = 0.0
+
+    # Where each magnet's operating range comes from. "current" is what
+    # +-`magnet_current_limit` amps reaches through the calibration in
+    # `data/clara/lattice_data/utils.py` — what the hardware can physically do.
+    # "archiver" is where the magnets happened to run over six months, from
+    # `magnet_ranges.json`; far narrower, and it has the FEA arc quadrupoles at
+    # [0, 0]. Magnets with no calibration (the sextupoles) fall back to the
+    # archiver either way.
+    magnet_range_source: str = "current"
+    magnet_current_limit: float = 100.0  # A
+
+    # Offer the three powered linac cavities' RF phases as knobs, in degrees, each
+    # within `cavity_phase_range` of the phase the lattice file runs it at. Phase
+    # sets the chirp, and so the energy spread the dogleg turns into beam size at
+    # the readout. `score.TUNABLE` allows cavity phases, so a tune that moves one
+    # is scorable; voltage and frequency are not.
+    include_cavity_phases: bool = True
+    cavity_phase_range: float = 30.0  # degrees either side of nominal
+
+    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 120 mrad.
+    # With the cavity phases, it is the handle on the energy spread at the readout.
+    # `score.TUNABLE_BY_NAME` allows the four VBC angles, so a tune that moves them
+    # is scorable; every other dipole in the line is geometry and stays fixed.
+    include_vbc_chicane: bool = True
+
+    # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`,
+    # `<corrector>_h` / `_v`, or `cla_vbc_chicane`). None gives it every magnet in
+    # the modelled stretch.
     controllable_magnets: list[str] | None = None
-    # {knob name: [low, high]} overriding the archiver ranges in
-    # `data/clara/lattice_data/magnet_ranges.json`.
+    # {knob name: [low, high]} overriding the ranges worked out above.
     magnet_limits: dict[str, list[float]] | None = None
