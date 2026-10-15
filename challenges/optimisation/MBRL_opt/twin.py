@@ -254,6 +254,11 @@ class Readings:
     raw_sigma_x: torch.Tensor
     raw_sigma_y: torch.Tensor
     scrape: torch.Tensor  # mean metres outside the beam pipe, over stops and particles
+    # The camera frame, when one was asked for: rows are y, columns x, origin at the
+    # bottom, exactly as `SimEnv` lays its screen images out. Only rendered for an
+    # unbatched track — a population of candidate frames is of no use to anyone and
+    # would cost more than the tracking.
+    image: torch.Tensor | None = None
 
     @property
     def moments(self) -> torch.Tensor:
@@ -595,6 +600,7 @@ class CheetahTwin:
         screen: str | None = None,
         batch: int | None = None,
         soft: float | None = None,
+        image_shape: tuple[int, int] | None = None,
     ) -> Readings:
         """Track the beam to `screen` and read every diagnostic on the way.
 
@@ -666,10 +672,10 @@ class CheetahTwin:
                 bpm_x[name] = _masked_mean(x, live) - offset[0]
                 bpm_y[name] = _masked_mean(y, live) - offset[1]
             if name == screen:
-                exposure = self._expose(name, x, y, live, state, soft)
+                exposure = self._expose(name, x, y, live, state, soft, image_shape)
 
         assert exposure is not None, f"{screen} is not a stop of this line"
-        measured, raw, on_screen, fraction = exposure
+        measured, raw, on_screen, fraction, image = exposure
         transmission = live.sum(dim=-1) / count
         scrape = (
             torch.stack(_broadcast(outside), dim=-1).mean(dim=-1)
@@ -705,6 +711,7 @@ class CheetahTwin:
             raw_sigma_x=raw[2].expand(batch),
             raw_sigma_y=raw[3].expand(batch),
             scrape=scrape.expand(batch),
+            image=image,
         )
 
     @staticmethod
@@ -714,7 +721,7 @@ class CheetahTwin:
             return alive
         return alive * _aperture(margin, soft)
 
-    def _expose(self, name, x, y, live, state, soft=None):
+    def _expose(self, name, x, y, live, state, soft=None, image_shape=None):
         """What the camera measures, and what the beam is actually doing.
 
         The measured set is `SimEnv._expose` exactly: off the screen's own centre,
@@ -751,7 +758,29 @@ class CheetahTwin:
             _masked_std(x, everything, raw_mu_x),
             _masked_std(y, everything, raw_mu_y),
         )
-        return measured, raw, on_screen, fraction
+        return measured, raw, on_screen, fraction, self._render(
+            name, x, y, on_chip, image_shape
+        )
+
+    def _render(self, name, x, y, on_chip, shape):
+        """The camera frame, binned as `SimEnv` bins it: rows y, columns x.
+
+        A histogram of the particles that landed on the chip, over the chip's own
+        extent, so a twin standing in for the environment hands a policy the same
+        picture the environment would.
+        """
+        if shape is None or x.dim() > 1:
+            return None
+        keep = on_chip.detach() > 0.5
+        extent = self._extent[name]
+        rows = torch.linspace(extent[2], extent[3], int(shape[0]) + 1)
+        columns = torch.linspace(extent[0], extent[1], int(shape[1]) + 1)
+        image, _, _ = np.histogram2d(
+            y.detach().numpy()[keep.numpy()],
+            x.detach().numpy()[keep.numpy()],
+            bins=(rows.numpy(), columns.numpy()),
+        )
+        return torch.tensor(image, dtype=DTYPE)
 
     def screen_extent(self, screen: str | None = None) -> tuple[float, float, float, float]:
         """(x_min, x_max, y_min, y_max) in metres that a screen spans."""
