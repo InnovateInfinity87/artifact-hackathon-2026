@@ -24,9 +24,9 @@ import copy
 import cheetah
 import numpy as np
 import torch
-from rl_framework.envs.sim_env import BPM_TAG, DTYPE, SCREEN_TAG, VBC_EDGE
 
-from .optics_env import OpticsEnv
+# optics_env puts RL_framework on the path, so the names come through it
+from .optics_env import BPM_TAG, DTYPE, SCREEN_TAG, VBC_EDGE, OpticsEnv
 
 # Settings per vectorised track: memory goes as chunk x particles x 7.
 CHUNK = 512

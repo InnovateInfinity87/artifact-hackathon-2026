@@ -5,6 +5,50 @@ Getting through a `SimEnv` episode (a new day on CLARA) to the requested spot at
 Bayesian optimisation between the model and the machine. The plan is in the
 project notes (`mfopt/plan.md`).
 
+## How an episode is solved
+
+The workflow, from `reset` to the score, is drawn in
+[`talk_figures/mfopt/mfopt_workflow.svg`](../talk_figures/mfopt/mfopt_workflow.svg).
+Purple boxes run in the error-free twin and cost no step; every other box is a shot
+on the machine, one step each.
+
+1. **Model, free.** The request (sigma_x, sigma_y) picks the target optics from the
+   VBC-on node table, re-matched in the twin (`optics_env.py`), and the orbit
+   responses at that optics from the precomputed table (`responses.py`).
+2. **Stage A: optics and linear steering** (`steering.py`, about 5 steps). Load the
+   optics. If the beam is lost part way, thread it: SVD steering on the BPMs that
+   read, with R cropped to them and the correctors upstream of them, until every
+   BPM reads. Then two SVD shots of the orbit onto the twin's orbit, and up to three
+   Newton shots of the last two correctors (FEH HVCOR 01 and 02) to put the centroid
+   on the request.
+3. **Stage D: MF-BO of the spot size, linear steering of its position**
+   (`mfbo.py`). The BO searches only the knobs that shape the spot: the five
+   quadrupoles closest to the IP (FEA Q14, Q15, Q16, FEH Q1, Q2) and the two FEA
+   sextupoles, about their stage A values. Position is left out of the search
+   because it is linear in the correctors: on every BO shot the FEH correctors are
+   set, from their known linear response, to cancel the centroid error the GP
+   predicts for that quadrupole setting, and that known kick is taken back out of
+   the measured centroid before it reaches the GP. They come after the last BPM, so
+   they move the spot and nothing upstream.
+   - Low fidelity: 256 Sobol points of the twin over the 7 knobs, in one batched
+     Cheetah track, with a GP per readout (mu_x, mu_y, sigma_x, sigma_y, T).
+   - High fidelity: the machine, modelled as the low-fidelity GP plus a discrepancy
+     (a constant offset after the first reading, a GP from the third).
+   - Each shot maximises the expected improvement of the benchmark mismatch,
+     computed from posterior samples. The loop stops when that improvement is worth
+     less than the score cost of one more step, and the episode ends by returning
+     to the best reading.
+4. **Score.** The benchmark score of the last reading of FEH-SCR-01: the mismatch in
+   requested spot sizes plus 2 (1 - T), capped at 10, plus 0.5 log2(1 + steps / 50).
+
+## Model settings
+
+The environment and the twin are `SimEnv` defaults on master: Cheetah, every
+drift, quadrupole and dipole at second order with second-order dipole edges (the
+lattice file), VBC on at 131.7 mrad with edges, apertures on, L4H off (tracked as a
+drift of its own length, `RLConfig.l4h_off`, as in `orbit_matching/`), and every
+magnet limited to what +-100 A reaches.
+
 ## Target optics: `optics_env.py`
 
 ```python
@@ -20,11 +64,13 @@ env.step(env.optics_action(optics))      # load the optics (one step)
 ```
 
 - **Optics.** Starts from the 144 nodes rematched with the VBC on at 131.7 mrad
-  (`optics_matching_vbc_on/`), interpolated in log size. Those were fitted in
-  second-order Cheetah, and in this environment's first-order model their spot is off
-  by up to about 30 %, so the four final-focus quadrupoles (FEA Q15/Q16, FEH Q1/Q2)
-  are re-matched to the request in an error-free copy of the environment (VBC on,
-  L4H on, apertures on), within the magnet limits.
+  (`optics_matching_vbc_on/`), interpolated in log size. Those were fitted with L4H
+  powered and no magnet limits, so the four final-focus quadrupoles (FEA Q15/Q16,
+  FEH Q1/Q2) are re-matched to the request in an error-free copy of the environment
+  (see Model settings), within the magnet limits. Below about 0.13 mm in x the
+  nodes need FEH Q2 above its limit (12.5 m^-2 at 100 A; the nodes go to 17.6), and
+  no re-match within limits gets lower, even with all 12 downstream quadrupoles or
+  the sextupoles free.
   `optics.achieved`, `optics.transmission` and `optics.clipped` say how well that went.
 - **Quadrupole modes.** SVD of d ln(rms size) / d k1 at every screen and the readout,
   for all 46 quadrupoles. Rows and weights follow `SizeModes` (the readout carries
@@ -55,13 +101,18 @@ at["J"]      # readout (mu_x, mu_y, sigma_x, sigma_y, T)  x  DOF
   Q16, FEH Q1, Q2), the five correctors per plane closest to it (FEA HVCOR 04, 05,
   06, FEH HVCOR 01, 02) and the two FEA sextupoles.
 - **Table.** Built at every node of the VBC-on grid after the final-focus re-match,
-  in the error-free first-order model: `k1`, `readout`, `clipped`, `feasible`
+  in the error-free twin: `k1`, `readout`, `clipped`, `feasible`
   (T >= 95 % and both sizes within 5 %), `relative_error`.
 - **Twin.** The error-free twin tracks 5,000 particles (`OpticsEnv(twin_particles=...)`),
   half of the environment's 10,000, which keeps the rms sizes to about 1 %.
 - **Rebuild.** `python -m MFopt.responses --workers 16` from `challenges/optimisation`,
-  about 3 minutes on 16 cores. 118 of the 144 nodes are feasible, including every
-  node in the benchmark's 80 to 400 um range except 0.1 x 0.1 mm.
+  about 4 minutes on 16 cores. 105 of the 144 nodes are feasible (T >= 95 %, both
+  sizes within 5 %). Inside the benchmark's 80 to 400 um range the misses are the
+  nodes with sigma_x <= 0.162 mm, which need FEH Q2 beyond its limit (see above).
+- **Check against `orbit_matching/`.** At the 105 feasible nodes our orbit response
+  R agrees with Eiad's Cheetah responses (same BPMs and correctors, L4H a drift) to
+  3.6 % median and 11 % at the 90th percentile (relative Frobenius norm). The rest
+  is our re-matched final focus.
 
 Stage A steering (`steering.py`) reads the orbit and spot responses from this table
 instead of tracking them per episode.
@@ -79,18 +130,33 @@ days on which the beam is lost part way along the line; stage A then threads it
 (`steering.thread`). Results go to `MFopt/results/<policy>[_<tag>].json`. MF-BO needs
 `botorch`.
 
-## Results (15 Oct, VBC 131.7 mrad, 5k-particle twin table)
+## Results (15 Oct, second order, L4H off, VBC 131.7 mrad)
 
 | Days | Policy | Mean score | Median | Within 10 % | Within 25 % | Steps |
 |---|---|---|---|---|---|---|
-| 30 default (seeds 1000-1029) | do nothing | 9.37 | 10.00 | 0 % | 0 % | 0 |
-| | optics only | 6.50 | 6.22 | 0 % | 0 % | 1 |
-| | stage A | 0.49 | 0.38 | 30 % | 73 % | 4.6 |
-| | stage A + MF-BO | 0.32 | 0.25 | 77 % | 97 % | 10.2 |
-| 12 lost-beam (misalignment x5, seeds 1000-1011) | stage A | 0.48 | 0.43 | 33 % | 83 % | 7.2 |
-| | stage A + MF-BO | 0.37 | 0.30 | 75 % | 92 % | 13.2 |
+| 30 default (seeds 1000-1029) | do nothing | 9.30 | 10.00 | 0 % | 0 % | 0 |
+| | optics only | 6.99 | 7.05 | 0 % | 0 % | 1 |
+| | stage A | 0.59 | 0.47 | 17 % | 67 % | 4.7 |
+| | stage A + MF-BO | 0.41 | 0.36 | 53 % | 87 % | 7.9 |
+| 12 lost-beam (misalignment x5, seeds 1000-1011) | stage A | 0.62 | 0.65 | 0 % | 42 % | 6.2 |
+| | stage A + MF-BO | 0.49 | 0.49 | 33 % | 83 % | 13.2 |
 
-Every episode ends within 50 steps (longest 32) with the beam on the screen.
+Every episode ends within 50 steps (longest 20) with the beam on the screen
+(transmission at least 85 %). MF-BO improves on stage A by 0.18 +- 0.04 per day
+(paired over the 30 days).
+
+Two things limit it on this model, both worse than on the linear lattice it was
+first tested on (mean 0.32, 77 % within 10 %):
+
+- **Shot-to-shot jitter.** At fixed settings the readout sigma_x moves by about
+  0.15 in ln(sigma) rms (175 to 270 um on a 200 um spot, seed 1000), because the
+  launch jitter now reaches the spot through second-order chromatic terms. The
+  score is a single reading, so this sets a floor of roughly 0.2 to 0.3. Treating
+  the sizes as ln(sigma) in the GPs and ranking settings by posterior mean instead of
+  by the best reading made no significant difference (+0.02 +- 0.02 and +0.04 +-
+  0.03), so `mfbo.py` keeps the simpler scheme.
+- **Small horizontal spots.** Requests below about 0.13 mm in x need FEH Q2 beyond
+  its limit, so those days end with sigma_x too large.
 
 ## Log: energy discrepancy at the VBC
 
@@ -109,5 +175,5 @@ one vectorised Cheetah pass and returns the same readings as N calls to `_probe`
 (they agree to about 1e-7 relative). It runs on a private deep copy of the twin's
 segment, so the twin that `_probe` and the re-match use is never left batched. The
 MF-BO low fidelity (256 points) and every finite difference in `responses.py` go
-through it: a table node takes 3 s instead of 15 s, the low-fidelity sample 1.5 s
+through it: on the linear lattice a table node took 3 s instead of 15 s, the low-fidelity sample 1.5 s
 instead of 10 s.
