@@ -111,14 +111,31 @@ def acquire(env, configs, keys, base, shots=10, out=common.HERE / "images_simenv
     return out
 
 
-def no_tdc_plan(line, phases=(-30.0, -23.0, -15.0, -8.0, 0.0), rescale=True):
+# S03/S04 quadrupoles for the FEA-01 images that take the beam through the 4.12 mm L4H
+# iris with the apertures in (VBC off): 98.6 % reaches FEA-01 at every phase, against
+# 70 % with the nominal S03/S04 setting. Nelder-Mead on SimEnv transmission, 15 Oct.
+FEA_L4H_MATCH = {
+    "cla_s03_mag_quad_01": -1.4224,
+    "cla_s04_mag_quad_01": 2.6981,
+    "cla_s04_mag_quad_02": -0.4489,
+    "cla_s04_mag_quad_03": -0.7350,
+    "cla_s04_mag_quad_04": -1.6278,
+    "cla_s04_mag_quad_05": -0.1423,
+    "cla_s04_mag_quad_06": -0.2843,
+    "cla_s04_mag_quad_07": 0.8083,
+    "cla_s04_mag_quad_08": -0.1372,
+}
+
+
+def no_tdc_plan(line, phases=(-30.0, -23.0, -15.0, -8.0, 0.0), rescale=True, fea_match=None):
     """Transverse block of the 21-image plan (S02-03, S03-01, S04-03 under nominal, s02a,
-    s02b, s02c) and the FEA-01 spectrometer setting at several L02 phases, TDC off."""
+    s02b, s02c) and the FEA-01 spectrometer setting at several L02 phases, TDC off.
+    `fea_match` adds upstream quadrupole settings to the FEA images (FEA_L4H_MATCH)."""
     plan = {c.name: c for c in full6d.make_plan(line)}
     screens = ["cla_s02_dia_scr_03", "cla_s03_dia_scr_01", "cla_s04_dia_scr_03"]
     configs = [full6d.Config(n, plan[n].k1, 0.0, screens) for n in ("nominal_off", "s02a", "s02b", "s02c")]
-    fea = plan["fea_01_off"]
+    fea_k1 = {**plan["fea_01_off"].k1, **(fea_match or {})}
     for p in phases:
-        configs.append(full6d.Config(f"fea_01_ph{p:+.0f}", fea.k1, 0.0, ["cla_fea_dia_scr_01"], {L02: p}, rescale))
+        configs.append(full6d.Config(f"fea_01_ph{p:+.0f}", fea_k1, 0.0, ["cla_fea_dia_scr_01"], {L02: p}, rescale))
     keys = [(c.name, s) for c in configs for s in c.screens]
     return configs, keys
