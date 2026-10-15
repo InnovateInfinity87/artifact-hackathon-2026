@@ -29,11 +29,27 @@ An observation is a dictionary of the BPM readings and the image on that screen:
     {"bpm_x", "bpm_y":  metres off centre, in `env.bpm_names` order
      "bpm_valid":       1 where enough beam reached that BPM to give a reading
      "screen_image":    the viewed screen, rows are y, columns x, origin at the bottom
-     "screen_index":    which of `env.screen_names` the image came from}
+     "screen_index":    which of `env.screen_names` the image came from
+     "target":          what the beam is asked for on that screen this episode,
+                        (mu_x, mu_y, sigma_x, sigma_y) in metres off its centre}
 
 Positions are relative to the diagnostic's own centre, as a camera or a BPM reports
 them, and particles that leave the beam pipe stop counting towards any reading
 further down the line.
+
+Every `reset()` also draws a different request — the spot the beam is wanted at,
+from the same distribution `score.sample_target` uses — and the reward is how far
+the reading is from it, in units of the spot size asked for, exactly as
+`score.per_case_scores` books it, less what the shot cost. `config.target` fixes
+the request instead.
+
+The request belongs to one screen, `config.target_screen`, the FEBE readout the
+benchmark scores. An episode starts with that screen in the beam and is judged on
+the last reading of it: looking at an upstream screen costs a shot and tells you
+something, but brings back no new reading of the request. `info["benchmark_score"]`
+is `score.Report.calc_score` for the episode as one case — the mismatch plus
+`EVAL_WEIGHT` per doubling of `EVAL_BUDGET` shots — so it can be compared with a
+scored tuner directly, while the reward itself stays dense enough to learn from.
 
 Every `reset()` draws a different machine: a beam of its own size, shape and
 position, magnets sitting a little off the strengths they were asked for, and a
@@ -127,6 +143,30 @@ SETPOINT_HEADROOM = 5
 # Survey error, per plane, as in `score.sample_misalignments`.
 MISALIGNMENT_RMS = 50e-6  # quadrupoles and sextupoles
 DIAGNOSTIC_OFFSET_RMS = 30e-6  # the centring of a camera or a BPM
+
+# What the beam is asked for, as `score.sample_target` asks for it: a spot size
+# log-uniform between these, and a position uniform within this of the screen centre.
+REQUESTED_SPOT = (80e-6, 400e-6)  # m
+REQUESTED_OFFSET = 2e-3  # m
+# What a case books when the beam is lost, and the most any one reading can cost,
+# in units of the spot that was asked for. `score.FAILURE_SCORE`.
+FAILURE_SCORE = 10.0
+TARGET_LABELS = ("mu_x", "mu_y", "sigma_x", "sigma_y")
+# What shots cost, as `score.Report.calc_score` prices them: EVAL_WEIGHT for every
+# doubling of EVAL_BUDGET, because beam time costs orders of magnitude rather than
+# increments — 40 shots to 80 is priced like 2000 to 4000.
+EVAL_WEIGHT = 0.5
+EVAL_BUDGET = 50.0
+# The worst a reading can be for the purpose of the reward. The benchmark stops
+# counting at ten spot sizes, which is the whole reachable range for an untuned
+# machine — an 85 um request and a 3 mm beam is thirty-five spot sizes out — so the
+# reward needs to see further than that or it is flat where the learning happens.
+MAX_MISMATCH = 100.0
+
+
+def evaluation_cost(shots: int) -> float:
+    """What `shots` shots have cost so far, in requested spot sizes."""
+    return EVAL_WEIGHT * float(np.log2(1 + shots / EVAL_BUDGET))
 
 
 def _import_xsuite_model(directory: str | Path | None):
@@ -520,13 +560,16 @@ class SimEnv(BaseAcceleratorEnv):
                 "bpm_valid": spaces.MultiBinary(len(self.bpm_names)),
                 "screen_image": spaces.Box(0.0, image_high, self._shape, np.float32),
                 "screen_index": spaces.Discrete(len(self.screen_names)),
+                "target": spaces.Box(-np.inf, np.inf, (4,), np.float32),
             }
         )
 
         self._rng = np.random.default_rng()
+        self.target = self._draw_target()
         self.target_screen = config.target_screen
         self._readings: dict[str, Any] = {}
         self._simulate()
+        self._scored = self._readings["stats"]
 
     # ---------- the model doing the tracking ----------
 
@@ -739,6 +782,25 @@ class SimEnv(BaseAcceleratorEnv):
         )
         return coordinates
 
+    def _draw_target(self) -> np.ndarray:
+        """What the beam is asked for at the observed screen this episode:
+        (mu_x, mu_y, sigma_x, sigma_y) in metres, off the screen centre.
+
+        Drawn as `score.sample_target` draws it — position uniform, size log-uniform,
+        so a tight request is no rarer than a loose one — unless `config.target`
+        fixes it. Nothing guarantees it is reachable; the task is to get close.
+        """
+        if self.config.target is not None:
+            return np.asarray(self.config.target, dtype=float)
+        low, high = self.config.requested_spot
+        offset = self.config.requested_offset
+        return np.array([
+            self._rng.uniform(-offset, offset),
+            self._rng.uniform(-offset, offset),
+            float(np.exp(self._rng.uniform(np.log(low), np.log(high)))),
+            float(np.exp(self._rng.uniform(np.log(low), np.log(high)))),
+        ])
+
     def _draw_setpoint(self) -> dict[str, float]:
         """Magnets near, but not on, the strengths the lattice file asks for."""
         variation = self.config.magnet_variation
@@ -886,13 +948,28 @@ class SimEnv(BaseAcceleratorEnv):
             "bpm_valid": self._readings["bpm_valid"],
             "screen_image": self._readings["image"].astype(np.float32),
             "screen_index": self.screen_names.index(self._target_screen),
+            "target": self.target.astype(np.float32),
         }
 
     def _get_info(self) -> dict[str, Any]:
         mu_x, mu_y, sigma_x, sigma_y, on_screen = self._readings["stats"]
+        achieved = np.array([mu_x, mu_y, sigma_x, sigma_y])
         return {
             "screen": self._target_screen,
             "screen_extent": self.screen_extent(),
+            "target": self.target,
+            "error": achieved - self.target if on_screen else None,
+            "relative_error": self._relative_error(self._readings["stats"]),
+            # The benchmark's view: the last reading of the screen the request is
+            # for, however many screens have been looked at since. `benchmark_score`
+            # is `score.Report.calc_score` for this episode as one case, so it is
+            # comparable to a scored tuner and lower is better.
+            "scored_screen": self.config.target_screen,
+            "evaluations": self._step_count,
+            "scored_mismatch": self._mismatch(self._scored),
+            "scored_relative_error": self._relative_error(self._scored),
+            "benchmark_score": self._mismatch(self._scored)
+            + evaluation_cost(self._step_count),
             "mu_x": mu_x,
             "mu_y": mu_y,
             "sigma_x": sigma_x,
@@ -910,9 +987,16 @@ class SimEnv(BaseAcceleratorEnv):
         if screen is not None:
             self.target_screen = screen
         self._simulate()
+        if self._target_screen == self.config.target_screen:
+            self._scored = self._readings["stats"]  # a fresh reading of the request
 
-        reward = self._compute_reward(*self._readings["stats"])
+        # Dense: the mismatch every step, and the marginal cost of the shot it took.
+        # The costs telescope, so over an episode they come to `evaluation_cost` of
+        # the shots taken, exactly what the benchmark charges.
         self._step_count += 1
+        reward = self._compute_reward(*self._scored) - (
+            evaluation_cost(self._step_count) - evaluation_cost(self._step_count - 1)
+        )
         truncated = self._step_count >= self.config.max_episode_steps
         return self._get_obs(), reward, False, truncated, self._get_info()
 
@@ -951,25 +1035,75 @@ class SimEnv(BaseAcceleratorEnv):
             )
         return dict(zip(self.magnet_names, values)), None
 
-    def _compute_reward(self, mu_x, mu_y, sigma_x, sigma_y, on_screen) -> float:
-        """Negative beam size at the observed screen, in mm, with the centroid
-        penalised. The base class works in pixels; here the statistics are in metres,
-        so they are scaled to keep the reward comparable to the off-screen penalty."""
+    def _mismatch(self, stats, cap: float = FAILURE_SCORE) -> float:
+        """How far a reading is from the request, in requested spot sizes.
+
+        `score.per_case_scores` exactly: each component's error against the spot size
+        asked for, position and size weighted equally, clipped at `cap` — which is
+        also what a lost beam books, so losing the beam is never cheaper than
+        delivering a bad one. The benchmark's cap is `FAILURE_SCORE`; the reward
+        looks further, out to `MAX_MISMATCH`.
+        """
+        mu_x, mu_y, sigma_x, sigma_y, on_screen = stats
         if not on_screen:
-            return float(-1000)
-        return float(-(sigma_x + sigma_y + 0.1 * (abs(mu_x) + abs(mu_y))) * 1e3)
+            return cap
+        error = np.abs(
+            np.array([mu_x, mu_y, sigma_x, sigma_y]) - self.target
+        ) / float(self.target[2:].mean())
+        return float(min((error[0] + error[1]) / 2 + (error[2] + error[3]) / 2, cap))
+
+    def _relative_error(self, stats) -> float:
+        """`score.CaseResult.relative_error`: the mean component error in requested
+        spot sizes, which is what the benchmark's hit rates are thresholded on."""
+        mu_x, mu_y, sigma_x, sigma_y, on_screen = stats
+        if not on_screen:
+            return FAILURE_SCORE
+        achieved = np.array([mu_x, mu_y, sigma_x, sigma_y])
+        return float(np.abs(achieved - self.target).mean() / self.target[2:].mean())
+
+    def _compute_reward(self, mu_x, mu_y, sigma_x, sigma_y, on_screen) -> float:
+        """How far the beam is from what was asked for, negated.
+
+        `score.per_case_scores` exactly: each component's error in units of the spot
+        size that was requested, position and size weighted equally, clipped at
+        `FAILURE_SCORE` — which is also what a lost beam books, so losing the beam is
+        never cheaper than delivering a bad one. Dimensionless, and bounded, so a
+        tight request is no harder to score well on than a loose one.
+
+        `config.reward_shape` decides how the mismatch becomes a reward. "log" is
+        -log1p(mismatch), which falls off slowly and so keeps a gradient however far
+        out the beam is, while still being -mismatch to first order once the beam is
+        close, where the benchmark's own scale is the one that matters. "linear" is
+        the benchmark's -min(mismatch, FAILURE_SCORE) itself, flat beyond ten spot
+        sizes. Either way a lost beam is the worst a step can do.
+
+        The base class instead rewards the smallest centred spot it can get. Override
+        this to ask for something else.
+        """
+        stats = (mu_x, mu_y, sigma_x, sigma_y, on_screen)
+        if self.config.reward_shape == "linear":
+            return -self._mismatch(stats)
+        if self.config.reward_shape != "log":
+            raise ValueError(
+                f"{self.config.reward_shape!r} is not a reward shape: "
+                f"'log' or 'linear'."
+            )
+        return -float(np.log1p(self._mismatch(stats, cap=MAX_MISMATCH)))
 
     # ---------- base class hooks ----------
 
     def _hard_reset(self) -> dict[str, Any]:
         """A new machine: its own beam, set point and survey error, at the configured
         screen. With every variation at 0 this is the nominal model exactly."""
+        self.target = self._draw_target()
         self._coordinates = self._draw_beam()
+        self._scored = (0.0, 0.0, 0.0, 0.0, False)
         self._draw_setpoint()
         self._draw_misalignments()
 
         self.target_screen = self.config.target_screen
         self._simulate()
+        self._scored = self._readings["stats"]
         return self._get_obs()
 
     def _apply_action(self, native_values: np.ndarray):

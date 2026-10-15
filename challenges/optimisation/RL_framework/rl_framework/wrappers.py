@@ -14,9 +14,14 @@ screen rather than choosing between them.
 
 The observation stays a dictionary, which `MultiInputPolicy` handles, with the pieces
 put in the units a network wants: BPM readings as a fraction of the beam pipe radius
-rather than metres, and the screen image as an 8-bit single-channel picture, which is
-what makes stable-baselines3 put a CNN behind it instead of flattening 16,384 floats
-into the MLP. `screen_index` is dropped, being constant here.
+rather than metres, the screen image as an 8-bit single-channel picture, which is what
+makes stable-baselines3 put a CNN behind it instead of flattening 16,384 floats into
+the MLP, and the request as a fraction of the screen's half-width, so it is in the
+same units as the image's own axes. `screen_index` is dropped, being constant here.
+
+The requested spot is a small part of that range — the chip is tens of millimetres
+and the request hundreds of microns — so if a policy struggles to resolve it, scaling
+`target` by something tighter than the chip is the line to change.
 
 Because of those units, `gymnasium.wrappers.NormalizeObservation` is neither needed nor
 usable on top of this (it expects a single Box, and a running mean would undo the 8-bit
@@ -52,6 +57,10 @@ class SB3Wrapper(gym.Wrapper):
 
         self._scale = sim.config.beam_pipe_radius or DEFAULT_PIPE_RADIUS
         self._image_as_uint8 = image_as_uint8
+        # Position and size of the request, each against the half-width of the chip
+        # it is asked for on.
+        half = np.abs(sim.screen_extent())[[1, 3, 1, 3]]
+        self._target_scale = half
         bpms = len(sim.bpm_names)
         image = sim.observation_space["screen_image"].shape
         self.observation_space = spaces.Dict(
@@ -59,6 +68,7 @@ class SB3Wrapper(gym.Wrapper):
                 "bpm_x": spaces.Box(-1.0, 1.0, (bpms,), np.float32),
                 "bpm_y": spaces.Box(-1.0, 1.0, (bpms,), np.float32),
                 "bpm_valid": spaces.MultiBinary(bpms),
+                "target": spaces.Box(-1.0, 1.0, (4,), np.float32),
                 "screen_image": (
                     spaces.Box(0, 255, (1, *image), np.uint8)
                     if image_as_uint8
@@ -81,6 +91,7 @@ class SB3Wrapper(gym.Wrapper):
             "bpm_x": (observation["bpm_x"] / self._scale).astype(np.float32),
             "bpm_y": (observation["bpm_y"] / self._scale).astype(np.float32),
             "bpm_valid": observation["bpm_valid"],
+            "target": (observation["target"] / self._target_scale).astype(np.float32),
             "screen_image": (
                 (image * 255).astype(np.uint8)
                 if self._image_as_uint8
