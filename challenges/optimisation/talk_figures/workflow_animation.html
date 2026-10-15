@@ -67,6 +67,10 @@ const FUNNEL_HALF_GAP = 34;
 const urlParams = new URLSearchParams(location.search);
 let captionsVisible = !urlParams.has("clean");
 if (urlParams.get("theme") === "light") document.documentElement.dataset.theme = "light";
+// ?speed=2.5 plays the same trajectories 2.5x faster: the simulation still steps
+// at STEP_SECONDS, it just consumes real time quicker, so nothing moves or wanders
+// differently, the whole thing is simply over sooner.
+const TIME_SCALE = Math.max(0.1, parseFloat(urlParams.get("speed") || "1") || 1);
 
 // ---------- helpers ----------
 function seededRandom(seed) {
@@ -322,7 +326,7 @@ function frame(now) {
   const elapsed = Math.min((now - lastFrameTime) / 1000, 0.1);
   lastFrameTime = now;
   if (!paused) {
-    accumulator += elapsed;
+    accumulator += elapsed * TIME_SCALE;
     while (accumulator >= STEP_SECONDS) {
       simTime += STEP_SECONDS;
       if (simTime >= CHAOS_START) for (const strand of strands) advanceStrand(strand, simTime);

@@ -16,7 +16,9 @@ Keys: arrows or space to move, `f` fullscreen, `o` overview, `b` blank, `s` spea
 
 reveal.js 5.1.0 is vendored in `talk_assets/reveal/` (`reveal.js`, `reveal.css`, `theme/white.css`), so the deck needs no network. The one local change is the webfont `@import` removed from `white.css`; it falls back to the system sans.
 
-**The "seven workstreams" slide is the live animation.** It is `workflow_animation.html` in a reveal background iframe, so it animates in the browser and replays every time the slide is entered (reveal reloads background iframes on each visit). Click it to replay by hand. Edit the animation and the slide follows; there is nothing to re-render.
+**The "seven workstreams" slide is the live animation.** It is `workflow_animation.html` in a reveal background iframe, so it animates in the browser and replays every time the slide is entered (reveal reloads background iframes on each visit). Click it to replay by hand. Edit the animation and the slide follows; there is nothing to render.
+
+The slide asks for `?speed=2.5`, which brings it in at about six seconds. `speed` scales how fast real time is fed to the simulation and nothing else, so the strands wander exactly the same way, the run is just over sooner; without it the animation takes about fifteen.
 
 ### The story it tells
 
@@ -52,15 +54,6 @@ Numbers on the slides come from `MFopt/README.md` (the 100-day `calibrated_mfbo`
 `The big winners` is the one table that puts the methods together, sorted by score. They were measured on different draws of days and, for the SVD rows, a fixed 1x1 mm target rather than random requests, so the slide says so in a footnote; wall time is labelled as an order of magnitude rather than a ranking, since the runs were on machines under different load. If they are ever run as one experiment, drop the footnote.
 
 The MBRL wall time on the slides is **270 s per run**, from Amy, not the 1086 s in `results_100.json`: that field is per-episode wall measured with 50 episodes sharing one container, which is not what an operator would wait.
-
-### Stills of the animation
-
-The deck does not need them, but `scripts/make_anim_frames.py` renders `workflow_animation.html` to a numbered PNG sequence in `anim_frames/`, for a poster, a paper or a GIF. It reuses the model and drawing code from the HTML verbatim and only swaps the real-time loop for a deterministic one. Headless chromium screenshots come back blank for this canvas, so the page hands every frame back as a data URL in one `--dump-dom` instead.
-
-```bash
-python3 -I scripts/make_anim_frames.py            # 170 frames, light, 1280x720, 6.7 MB
-python3 -I scripts/make_anim_frames.py --theme dark --fps 12
-```
 
 ## Common settings (geometry and transmission-along-s figures)
 

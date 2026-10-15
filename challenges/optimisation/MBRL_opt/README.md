@@ -192,12 +192,17 @@ One episode, measured uncontended, with the stages timed separately:
 
 | | laptop (12 core) | apml1 (64 core) |
 |---|---|---|
-| per episode | **~270 s** (247–287) | **~430 s** (391–470) |
+| per episode, mean | **~270 s** | **557 s** |
+| range over 4 seeds | 247–287 s (4–6 shots) | 391–739 s (4–7 shots) |
 
 apml1 is *slower* per episode — about half the per-core speed. It wins only by
 running fifty at once, which is why a 100-episode study takes ~40 minutes there and
-would take seven hours here. Pick the box by how many episodes you want, not how
+would take seven hours here. Pick the box by how many episodes you want, not by how
 fast you want one.
+
+The spread is almost entirely shot count: roughly 150 s of fixed cost (the optics
+lookup) plus ~70 s per focus shot on apml1. A 4-shot episode is 391 s and a 7-shot
+one 739 s.
 
 Within an episode, in rough order (seed 1234 on apml1, 470 s):
 
