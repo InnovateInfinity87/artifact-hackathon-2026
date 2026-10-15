@@ -4,7 +4,7 @@ Figures for the CLARA hackathon talk, one section per figure: path (relative to 
 
 ## The deck
 
-`talk.html` is the talk: 18 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
+`talk.html` is the talk: 23 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
 
 ```bash
 python3 -m http.server -d . 8000     # then http://localhost:8000/talk.html
@@ -17,6 +17,10 @@ Keys: arrows or space to move, `f` fullscreen, `o` overview, `b` blank, `s` spea
 reveal.js 5.1.0 is vendored in `talk_assets/reveal/` (`reveal.js`, `reveal.css`, `theme/white.css`), so the deck needs no network. The one local change is the webfont `@import` removed from `white.css`; it falls back to the system sans.
 
 **The "seven workstreams" slide is the live animation.** It is `workflow_animation.html` in a reveal background iframe, so it animates in the browser and replays every time the slide is entered (reveal reloads background iframes on each visit). Click it to replay by hand. Edit the animation and the slide follows; there is nothing to re-render.
+
+Figures used: `geometry/line_geometry_apertures_nominal_beam.png`, `transmission_along_s/losses_by_section_vbc_on.png`, `optics_nodes/transmission_matrix_vbc_on.png`, `optics_nodes/rematch_vbc_on.png`, `mfopt/mfopt_workflow.svg` (an `<img>`, so its internal CSS is honoured and it stays sharp at any size) and `screens/`. `screens/` holds copies of `image_processing/Noisy_beam.png` and `Weak_beam.png`: the deck must not reference paths above its own folder, or serving this directory breaks the images.
+
+Numbers on the slides come from `MFopt/README.md` (30 days, seeds 1000-1029), `MBRL_opt/README.md` and its `results*.json` (32 episodes, seeds 1234-1265), `section-opt/section_review.md` (the S04 method comparison) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
 
 ### Stills of the animation
 
@@ -201,3 +205,13 @@ python3 -I scripts/make_anim_frames.py --theme dark --fps 12
 Key numbers (30 default days, seeds 1000-1029): stage A scores a mean of 0.49, with 30 % of days within 10 %, in about 5 steps. Stage A plus MF-BO scores 0.30 to 0.32, with 73 to 80 % within 10 %, in about 9 steps.
 
 Slide message: the model does most of the work for free, and the machine is spent only on what the model gets wrong.
+
+## MFopt: calibration + MF-BO on 100 days
+
+`mfopt/mfopt_workflow_calibrated.svg` is the episode workflow of the final MFopt policy (`--policies calibrated_mfbo`): calibrate the day's beam in the twin from the free reset reading, load the re-matched optics with the FEH correctors already aimed, steer, refit after every reading, then MF-BO with the calibrated twin as low fidelity.
+
+`mfopt/mfopt_100_episodes_{score,steps,wall_time_s,screen_moves}.{png,pdf}` are histograms over 100 fresh days (seeds 2000-2099), and `mfopt_100_episodes_all.*` all four in one figure; `mfopt/mfopt_100_episodes.json` holds the summary and every episode (target, score, steps, wall time, screen moves, final reading, per-step trace). Made by `scripts/mfopt_episode_stats.py` from `MFopt/results/calibrated_mfbo_100.json`.
+
+Key numbers: score mean 0.40, median 0.29 (10th to 90th percentile 0.16 to 0.72); 62 % of days within 10 % of the request; 8.7 steps on average, median 7; no screen moves (the policy reads only the readout screen and the BPMs); wall time 258 s per episode with 16 episodes sharing the machine. Requests below 0.135 mm in x (29 days) average 0.51 because FEH Q2 cannot go past 100 A; the other days average 0.35.
+
+Slide message: a physics model of the day's beam, fitted from every reading including the free one at reset, gets the spot in a median of 7 shots.
