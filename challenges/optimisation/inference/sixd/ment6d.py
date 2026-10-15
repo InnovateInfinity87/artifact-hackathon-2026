@@ -547,8 +547,8 @@ def resample_stages(line, cfgs, keys_used, data, n_meas, sample, w, stages=6, n_
     return sample, w, indices, history
 
 
-def chirp_scan(line, cfgs, keys_used, data, n_meas, sample, w, chirps=(-10, -5, 0, 5, 10, 14, 18, 22),
-               slices=(1.5e-3, 4e-3), n_fit=40_000, seed=3, workers=4, log=print):
+def chirp_scan(line, cfgs, keys_used, data, n_meas, sample, w, chirps=(-10, -5, 0, 4, 8, 12, 16, 20, 24),
+               slices=(0.5e-3, 1e-3, 2e-3, 4e-3), n_fit=40_000, seed=3, workers=4, log=print):
     """Global search of the S02 energy chirp: resample the current result, set
     delta = <delta> + c (tau - <tau>) + s xi and score every (c, s) of a grid by the image
     chi2. The chi2 has a second, shallower minimum at negative chirp, so a local search from
