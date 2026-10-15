@@ -60,24 +60,42 @@ class Config:
     tdc_voltage_v: float = 0.0
     screens: list[str] = field(default_factory=list)
     rf_phase_deg: dict[str, float] = field(default_factory=dict)  # cavity -> phase change
+    rf_rescale: bool = True  # downstream magnets follow the new energy
 
 
 def apply_config(line: cv.XsuiteLine, config: Config) -> None:
     line.restore_nominal_quads()
     line.set_quad_k1(config.k1)
     set_tdc_voltage(line, config.tdc_voltage_v)
-    set_rf_phases(line.line, config.rf_phase_deg)
+    set_rf_phases(line.line, config.rf_phase_deg, config.rf_rescale)
 
 
 _RF_NOMINAL: dict[int, dict] = {}
 
 
-def set_rf_phases(xline, changes: dict[str, float]) -> None:
+def chip_geometry(pixel_m=50e-6, rebin=2):
+    """Each screen's real chip, from the Cheetah lattice (as SimEnv images them):
+    screen -> (xmin, xmax, ymin, ymax, nx, ny) at about `pixel_m`, with nx, ny multiples
+    of `rebin`."""
+    import cheetah
+
+    out = {}
+    for el in common.xsuite_model.cheetah_segment().elements:
+        if isinstance(el, cheetah.Screen) and "dia_scr" in el.name:
+            x0, x1, y0, y1 = (float(v) for v in el.extent)
+            nx = max(rebin, int(round((x1 - x0) / pixel_m / rebin)) * rebin)
+            ny = max(rebin, int(round((y1 - y0) / pixel_m / rebin)) * rebin)
+            out[el.name] = (x0, x1, y0, y1, nx, ny)
+    return out
+
+
+def set_rf_phases(xline, changes: dict[str, float], rescale: bool = True) -> None:
     """Shift the phase of whole linac cavities (cheetah convention, degrees) and scale the
     reference energy gain of each cavity with cos(phi), i.e. every downstream magnet is
     rescaled to the new beam energy, as operators do for a phase scan. The edge and
     ponderomotive lenses are left at their nominal strength (small). Cavities not named
-    go back to nominal. Works on any xsuite line built by xsuite_model (SimEnv's too)."""
+    go back to nominal. rescale=False keeps the magnets at their currents: the beam
+    then comes out off momentum, as when only the phase is changed. Works on any xsuite line built by xsuite_model (SimEnv's too)."""
     key = id(xline)
     if key not in _RF_NOMINAL:
         nominal = {}
@@ -95,7 +113,7 @@ def set_rf_phases(xline, changes: dict[str, float]) -> None:
         dphi = np.radians(changes.get(cavity, 0.0))
         any_phase = next(iter(entry["cav"].values()))
         phi0 = np.pi / 2 - any_phase  # cheetah phase
-        ratio = np.cos(phi0 + dphi) / np.cos(phi0)
+        ratio = np.cos(phi0 + dphi) / np.cos(phi0) if rescale else 1.0
         for name, phase in entry["cav"].items():
             xline.element_dict[name].phase = phase - dphi
         for name, dp in entry["ref"].items():

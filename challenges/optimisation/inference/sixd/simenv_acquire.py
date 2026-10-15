@@ -108,7 +108,7 @@ def acquire(env, configs, keys, base, shots=10, out=common.HERE / "images_simenv
     return out
 
 
-def no_tdc_plan(line, phases=(-10.0, -5.0, 0.0, 5.0, 10.0)):
+def no_tdc_plan(line, phases=(-30.0, -23.0, -15.0, -8.0, 0.0), rescale=True):
     """Transverse block of the 21-image plan (S02-03, S03-01, S04-03 under nominal, s02a,
     s02b, s02c) and the FEA-01 spectrometer setting at several L02 phases, TDC off."""
     plan = {c.name: c for c in full6d.make_plan(line)}
@@ -116,6 +116,6 @@ def no_tdc_plan(line, phases=(-10.0, -5.0, 0.0, 5.0, 10.0)):
     configs = [full6d.Config(n, plan[n].k1, 0.0, screens) for n in ("nominal_off", "s02a", "s02b", "s02c")]
     fea = plan["fea_01_off"]
     for p in phases:
-        configs.append(full6d.Config(f"fea_01_ph{p:+.0f}", fea.k1, 0.0, ["cla_fea_dia_scr_01"], {L02: p}))
+        configs.append(full6d.Config(f"fea_01_ph{p:+.0f}", fea.k1, 0.0, ["cla_fea_dia_scr_01"], {L02: p}, rescale))
     keys = [(c.name, s) for c in configs for s in c.screens]
     return configs, keys

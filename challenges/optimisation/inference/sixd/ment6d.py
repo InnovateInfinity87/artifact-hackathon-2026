@@ -43,9 +43,10 @@ _SAMPLE = None
 
 # ---------------------------------------------------------------------------- data
 def load_images(path=IMAGES):
-    data = np.load(path)
+    data = np.load(path, allow_pickle=True)
     keys = [tuple(str(k).split("|")) for k in data["keys"]]
-    images = data["images"].astype(float)
+    raw = np.load(path, allow_pickle=True)["images"] if data["images"].dtype == object else data["images"]
+    images = [np.asarray(i, dtype=float) for i in raw] if raw.dtype == object else raw.astype(float)
     n_particles = int(data["n_particles"]) if "n_particles" in data else len(data["beam"])
     GEOMETRY.clear()
     if "geometry_screens" in data:  # SimEnv images: each screen's own chip
