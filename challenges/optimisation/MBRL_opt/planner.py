@@ -371,8 +371,14 @@ class Planner:
                 soft=SOFT_APERTURE,
             )
             loss = self._cost(readings, target, anchor, position_weight)
+            # A candidate the twin could not evaluate is the worst candidate, not a
+            # reason to reject every later one: comparing against NaN is always
+            # False, so without this a single bad first step leaves `best_cost` at
+            # infinity and the whole shot is thrown away having moved nothing.
             value = float(loss.detach())
-            if value < best_cost:
+            if not np.isfinite(value):
+                value = np.inf
+            if value < best_cost or not np.isfinite(best_cost):
                 best_cost, best = value, native.detach().numpy().copy()
 
             loss.backward()

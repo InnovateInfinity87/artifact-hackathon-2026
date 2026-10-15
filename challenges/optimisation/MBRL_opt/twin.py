@@ -367,6 +367,40 @@ def _masked_std(values: torch.Tensor, weight: torch.Tensor, mean: torch.Tensor) 
 class CheetahTwin:
     """A differentiable Cheetah model of the stretch SimEnv tracks."""
 
+    @classmethod
+    def for_env(cls, env, num_particles: int | None = None) -> "CheetahTwin":
+        """A twin of the machine `env` is actually simulating.
+
+        Everything that decides what the lattice *is* — which file, where it starts
+        and ends, whether the vacuum chamber is in it, whether the L4H linearizer is
+        powered or standing in as a drift — is read off the environment's own
+        config and run through the environment's own helpers, rather than being
+        guessed at from defaults that match today.
+
+        That is worth the indirection. Three times now the environment has changed
+        underneath this twin — apertures added, the VBC turned on, L4H switched for
+        a drift — and each time a twin built from its own assumptions went on
+        planning confidently against a machine that no longer existed, out by a
+        millimetre or more at the readout with nothing obviously wrong. Deriving
+        from the config means the next such change arrives here too.
+        """
+        from rl_framework.envs import sim_env as _sim
+
+        config = env.config
+        lattice = config.nominal_lattice_json or env.model.LATTICE_JSON
+        if getattr(config, "l4h_off", False):
+            lattice = _sim._without_l4h(lattice)
+        return cls(
+            lattice_json=lattice,
+            distribution=config.distribution_path or DISTRIBUTION_NPZ,
+            start=config.lattice_start,
+            end=config.lattice_end,
+            num_particles=num_particles or config.num_particles or 10_000,
+            beam_pipe_radius=config.beam_pipe_radius,
+            min_screen_fraction=config.min_screen_fraction,
+            apertures=getattr(config, "apertures", True),
+        )
+
     def __init__(
         self,
         lattice_json: str | Path = LATTICE_JSON,

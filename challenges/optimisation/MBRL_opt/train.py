@@ -60,7 +60,7 @@ def _init(config: MBRLConfig, targets: np.ndarray) -> None:
         num_particles=config.twin_particles,
         fit_misalignments=config.fit_misalignments,
     )
-    agent = MBRLAgent(config, CheetahTwin(num_particles=config.twin_particles))
+    agent = MBRLAgent(config, CheetahTwin.for_env(optics, config.twin_particles))
     agent.record = True
     _WORKER.update(machine=machine, agent=agent, targets=targets)
 

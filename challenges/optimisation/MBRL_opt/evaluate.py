@@ -93,13 +93,13 @@ def build(config: MBRLConfig, particles: int, variation: float, misalignment: fl
     enough to mismeasure an rms by 70 microns. At 512 the measure tracks the true
     moments to a tenth of a micron.
     """
-    twin = CheetahTwin(num_particles=config.twin_particles)
     rl = RLConfig()
     rl.num_particles = particles
     rl.beam_variation = variation
     rl.misalignment_variation = misalignment
     rl.screen_shape = config.screen_shape
-    return OpticsEnv(rl), twin
+    env = OpticsEnv(rl)
+    return env, CheetahTwin.for_env(env, config.twin_particles)
 
 
 def summarise(name: str, results: list, seconds: float) -> dict:

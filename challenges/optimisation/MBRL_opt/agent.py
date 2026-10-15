@@ -112,9 +112,14 @@ class MBRLAgent:
         policy=None,
     ):
         self.config = config or MBRLConfig()
-        self.twin = twin or CheetahTwin(num_particles=self.config.twin_particles)
-        self.identifier = SystemID(self.twin, self.config.fit_misalignments)
-        self.planner = Planner(self.twin, self.config)
+        # Built lazily from the environment unless one was handed in, so the twin
+        # is always a model of the machine actually being tuned. See
+        # `CheetahTwin.for_env`.
+        self.twin = twin
+        self.identifier = None if twin is None else SystemID(
+            twin, self.config.fit_misalignments
+        )
+        self.planner = None if twin is None else Planner(twin, self.config)
         # The Dyna layer, if one has been trained: proposes the focus move in a
         # millisecond where the planner takes seconds. `policy.py`.
         self.policy = policy
@@ -125,11 +130,19 @@ class MBRLAgent:
         # move) pairs behaviour cloning is trained from.
         self.recorded: list[tuple[np.ndarray, np.ndarray]] = []
 
+    def _ensure_twin(self, env) -> None:
+        """Make sure there is a twin, and that it models this environment."""
+        if self.twin is None:
+            self.twin = CheetahTwin.for_env(env, self.config.twin_particles)
+            self.identifier = SystemID(self.twin, self.config.fit_misalignments)
+            self.planner = Planner(self.twin, self.config)
+
     # ---------- one episode ----------
 
     def run(self, env, seed: int | None = None, verbose: bool = False) -> EpisodeResult:
         """Tune the machine `env.reset()` deals, and report how close it got."""
         started = time.monotonic()
+        self._ensure_twin(env)
         observation, info = env.reset(seed=seed)
         rng = np.random.default_rng(seed)
         self.identifier.reset()
