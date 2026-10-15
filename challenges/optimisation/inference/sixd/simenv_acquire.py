@@ -75,8 +75,9 @@ def svd_steer(env, model, base, iterations=3, cutoff=1e-3, screen="cla_feh_dia_s
 
 
 def config_magnets(base, config):
-    """Magnet and phase settings for a Config. The phase only: SimEnv rescales nothing
-    downstream, which is Config.rf_rescale = False."""
+    """Magnet and phase settings for a Config. A SimEnv phase change moves the reference
+    energy downstream and its magnet strengths are normalised to it, so the magnets
+    follow the energy: that is Config.rf_rescale = True (checked on FEA-01, 15 Oct)."""
     out = dict(base)
     out.update(config.k1)
     for cavity, p in config.rf_phase_deg.items():
