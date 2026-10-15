@@ -35,9 +35,29 @@ S02_Q_CURRENTS_A = {  # tomography/README.md section 6, S02 quad_01 / quad_02
 }
 
 
-def build_line(end: str = LINE_END) -> cv.XsuiteLine:
+VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02", "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
+
+
+def vbc_off_lattice(path=common.HERE / "CLARA_cheetah_vbc_off.json"):
+    """The lattice file with the VBC chicane at angle 0 (dipole faces square), written
+    next to this module: the measurement plan runs with the VBC off."""
+    import json
+
+    lattice = json.loads(xsuite_model.LATTICE_JSON.read_text())
+    elements = lattice["elements"] if "elements" in lattice else lattice
+    for name in VBC_DIPOLES:
+        for key in ("angle", "dipole_e1", "dipole_e2"):
+            elements[name][1][key] = 0.0
+    path.write_text(json.dumps(lattice))
+    return path
+
+
+def build_line(end: str = LINE_END, apertures: bool = False, vbc_off: bool = True) -> cv.XsuiteLine:
+    """The model line, by default with the VBC off; `apertures` adds the vacuum chamber,
+    which loses particles."""
     _, energy_ev, _ = xsuite_model.load_distribution()
-    converted = xsuite_model.build_line(energy_ev, end=end)
+    lattice = vbc_off_lattice() if vbc_off else xsuite_model.LATTICE_JSON
+    converted = xsuite_model.build_line(energy_ev, lattice, end=end, apertures=apertures)
     tdc.install_tdc(converted, voltage_v=0.0)
     line = cv.XsuiteLine(converted)
     return line
