@@ -26,11 +26,15 @@ L02 = "cla_l02_lin_cav_01"
 PHASE_SIGN = 1.0
 
 
-def make_env(num_particles=20_000, seed=0, **kwargs):
+def make_env(num_particles=20_000, seed=0, lattice=None, **kwargs):
+    """SimEnv (xsuite backend) on the plan's lattice (full6d.plan_lattice: VBC off, L4H
+    off) unless `lattice` names another file."""
     from rl_framework.config import RLConfig
     from rl_framework.envs.sim_env import SimEnv
 
+    lattice = str(lattice or full6d.plan_lattice())
     env = SimEnv(RLConfig(backend="xsuite", num_particles=num_particles, normalise_image=False,
+                          nominal_lattice_json=lattice,
                           screen_shape=SHAPE, max_episode_steps=10**9, **kwargs))
     env.reset(seed=seed)
     return env
