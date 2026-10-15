@@ -188,9 +188,57 @@ def test_screen_measure() -> None:
     )
 
 
+def test_no_leakage() -> None:
+    """The agent knows nothing about the machine it has not measured.
+
+    The twin is built from the environment, which is a short step from being built
+    from the environment's *secrets*. It must carry the lattice — which magnets
+    exist, where the apertures are, whether L4H is powered — because an operator
+    knows all of that. It must not carry the survey error or the beam the episode
+    was dealt, because an operator does not.
+
+    The check is that the twin's opening prediction is the *same* for two different
+    machines, and wrong by the amount each was thrown off by. If anything leaked,
+    the two predictions would differ and both would be right.
+    """
+    print("\n4. the agent cannot see the machine it has not measured")
+    rl = RLConfig()
+    rl.num_particles = PARTICLES
+    rl.screen_shape = MBRLConfig().screen_shape
+    env = SimEnv(rl)
+    agent = MBRLAgent(MBRLConfig())
+    agent._ensure_twin(env)
+
+    predictions, truths, hidden = [], [], []
+    for seed in (7, 8):
+        observation, info = env.reset(seed=seed)
+        agent.identifier.reset()
+        state = agent.identifier.state
+        check(
+            f"seed {seed}: the fitted state starts at nominal",
+            all(float(np.abs(p.numpy()).max()) == 0.0 for p in state.parameters()),
+        )
+        reading = agent.twin.readings(state=state)
+        predictions.append(float(reading.sigma_x))
+        truths.append(float(info["sigma_x"]))
+        hidden.append(float(np.abs(env.beam_offset[:4]).max()))
+
+    check(
+        "the twin opens with the same prediction on two different machines",
+        abs(predictions[0] - predictions[1]) < 1e-9,
+        f"{predictions[0] * 1e6:.1f} um both times",
+    )
+    check(
+        "and is wrong, by about what each machine was thrown off by",
+        all(abs(p - t) > 1e-5 for p, t in zip(predictions, truths)),
+        f"machines differ by {abs(truths[0] - truths[1]) * 1e6:.0f} um, "
+        f"hidden launch offsets up to {max(hidden) * 1e6:.0f} um",
+    )
+
+
 def test_pipeline() -> None:
-    """The four stages, on a machine the agent has not seen."""
-    print("\n4. the pipeline tunes a machine it has not seen")
+    """The stages, on a machine the agent has not seen."""
+    print("\n5. the pipeline tunes a machine it has not seen")
     config = MBRLConfig()
     config.twin_particles = 2_000
     config.focus_shots = 10
@@ -236,6 +284,7 @@ def main() -> int:
     test_fidelity()
     test_batching_and_gradients()
     test_screen_measure()
+    test_no_leakage()
     test_pipeline()
     print(
         f"\n{len(passed)} passed, {len(failed)} failed, in {time.time() - start:.0f} s"

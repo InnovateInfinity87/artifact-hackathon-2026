@@ -4,7 +4,7 @@ Figures for the CLARA hackathon talk, one section per figure: path (relative to 
 
 ## The deck
 
-`talk.html` is the talk: 24 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
+`talk.html` is the talk: 32 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
 
 ```bash
 python3 -m http.server -d . 8000     # then http://localhost:8000/talk.html
@@ -18,11 +18,38 @@ reveal.js 5.1.0 is vendored in `talk_assets/reveal/` (`reveal.js`, `reveal.css`,
 
 **The "seven workstreams" slide is the live animation.** It is `workflow_animation.html` in a reveal background iframe, so it animates in the browser and replays every time the slide is entered (reveal reloads background iframes on each visit). Click it to replay by hand. Edit the animation and the slide follows; there is nothing to re-render.
 
-Figures used: `geometry/line_geometry_apertures_nominal_beam.png`, `transmission_along_s/losses_by_section_vbc_on.png`, `optics_nodes/transmission_matrix_vbc_on.png`, `optics_nodes/rematch_vbc_on.png`, `mfopt/mfopt_workflow.svg` (an `<img>`, so its internal CSS is honoured and it stays sharp at any size) and `screens/`. `screens/` holds copies of `image_processing/Noisy_beam.png` and `Weak_beam.png`: the deck must not reference paths above its own folder, or serving this directory breaks the images.
+### The story it tells
 
-Numbers on the slides come from `MFopt/README.md` (30 days, seeds 1000-1029, second order, L4H off), `MBRL_opt/README.md` and its `results_100.json` / `results_ablation.json` (100 episodes, seeds 1234-1333, L4H off; the 12-episode ablation is where the steering number comes from), `model-svd_opt/VALIDATION.md` and `results/cheetah_100_episodes/metrics.json` (100 episodes, seeds 42-141), `section-opt/section_review.md` (the S04 method comparison) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
+The deck runs in acts, and each slide carries its act as a small label above the title (`<p class="kicker">`), so the thread stays visible:
 
-The three tuners were measured on different seeds and budgets, so the slides never put their scores in one table. MFopt and MBRL_opt now at least run the same machine (L4H off); `model-svd_opt` spends about 190 steps a branch, so its score carries a much larger cost term. If that ever becomes one run, it becomes one table.
+1. **The problem** - an operator spends 30 to 90 minutes setting up, so the metrics are steps, screen changes, wall time and the match. Everything after is judged on those four.
+2. **Closing the sim2real gap** - tomography (can the model explain the beam at all), the optics lookup, the VBC-on rematch, and calibrating the day's beam from the free reset reading.
+3. **Finding the knobs** - the corrector and quadrupole SVDs.
+4. **Strategies** - response matrix, BO, RCDS, MF-BO, model-based RL, PPO, and a slide of the ones that lost.
+5. The robust screen measure and the capture filter sit in act 2: reading the beam the way the control room reads it is part of closing the gap, not a separate topic.
+6. **Results** - per method, one episode as an animation, then `The big winners`: one sorted table, best value in each column badged, baselines greyed.
+
+Keep that shape when adding slides: give a new slide a kicker naming its act, and put it with the others.
+
+Two conventions worth keeping:
+
+- **Formulae are LaTeX, not HTML.** `scripts/make_math_svgs.py` compiles them to `math/*.svg` (standalone class, sans maths, `pdftocairo -svg`), and the slides include them as `<img class="math">` with a `height` in `em`. HTML `<sub>`/`&radic;` did not survive projection. Add a formula to the `FORMULAE` dict and re-run the script.
+- **`<p class="review">` is a review flag**, rendered as a red badge, with the detail in an `<aside class="notes">` beside it. Reveal hides the aside. Grep for `class="review"` and delete those lines before the talk.
+
+**Branding**, all of it lifted from the team's own page on the conference app:
+
+- **The fox** is the team's motif, so it is the watermark in the top-right corner of every slide (an emoji, in a fixed-position div outside `div.reveal` so reveal's scaling transform does not move it) and the face of the team card.
+- **The team card** on the title and closing slides copies the app's own: `--team` #10b981, 2px border, the same 160-degree gradient, the name, and the motto *Foxy Gradient - always finds the way down*.
+- **`brand/team/*.svg`** are the five members' avatars, decoded from the `data:` URIs in the saved page and stripped of their metadata blocks. They appear full size on the title and closing slides and at 34px beside the names on `How we split it`.
+- **`brand/agora_mark.svg`** is the conference's own mark, kept on the title slide only, with its palette (`--brand-purple` #ae81ff, `--brand-cyan` #66d9e8) on the two rules and the progress bar. Those two colours are decoration only - neither has the contrast to carry text on white, so headings and body stay on `--accent`.
+
+The animated GIF of one MBRL episode (`mbrl_episode/beam_focusing.gif`, made by `scripts/make_mbrl_episode_animation.py`) is included with `data-src` rather than `src`, so reveal drops it on the way out and it restarts from the first shot each time the slide is reached.
+
+Figures used: `geometry/line_geometry_apertures_nominal_beam.png`, `transmission_along_s/losses_by_section_vbc_on.png`, `optics_nodes/transmission_matrix_vbc_on.png`, `optics_nodes/rematch_vbc_on.png`, `mfopt/mfopt_workflow_calibrated.svg` and `mfopt/mfopt_100_episodes_all.png`, `segment_opt/comparison.png` and `segment_opt/response.png`, and `screens/`. The SVGs go in as `<img>`, so their internal CSS is honoured and they stay sharp at any size. `screens/` holds copies of `image_processing/Noisy_beam.png` and `Weak_beam.png`: the deck must not reference paths above its own folder, or serving this directory breaks the images.
+
+Numbers on the slides come from `MFopt/README.md` (the 100-day `calibrated_mfbo` run, seeds 2000-2099, and the 30-day paired ablation), `MBRL_opt/README.md` with `results_100.json` / `results_ablation.json` (100 episodes, seeds 1234-1333; the 12-episode ablation is where the steering result comes from), `model-svd_opt/VALIDATION.md` and `results/cheetah_100_episodes/metrics.json` (100 episodes, seeds 42-141), `section-opt/section_review.md` (the S04 method comparison), `inference/tomography/README.md` (the chi2/dof ladder) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
+
+`The big winners` is the one table that puts the methods together. They were measured on different draws of days and different budgets, so the slide says so in a footnote, and wall time is labelled as an order of magnitude rather than a ranking - the three runs had different parallel loads. If they are ever run as one experiment, drop the footnote.
 
 ### Stills of the animation
 
@@ -217,3 +244,34 @@ Slide message: the model does most of the work for free, and the machine is spen
 Key numbers: score mean 0.40, median 0.29 (10th to 90th percentile 0.16 to 0.72); 62 % of days within 10 % of the request; 8.7 steps on average, median 7; no screen moves (the policy reads only the readout screen and the BPMs); wall time 258 s per episode with 16 episodes sharing the machine. Requests below 0.135 mm in x (29 days) average 0.51 because FEH Q2 cannot go past 100 A; the other days average 0.35.
 
 Slide message: a physics model of the day's beam, fitted from every reading including the free one at reset, gets the spot in a median of 7 shots.
+
+## `mbrl_episode/beam_focusing.gif` — one episode, beam onto the requested spot
+
+**What it shows.** A single `MBRL_opt` episode against `SimEnv`, one frame per shot,
+nothing interpolated or re-ordered. Left: the readout camera at
+`cla_feh_dia_scr_01`, with the requested spot as a dashed purple ellipse and the
+measured spot as a solid orange one. Right: the benchmark score after every shot.
+The numbered PNGs of the same frames sit alongside it.
+
+**Settings.** Seed 1241, `MBRLConfig()` defaults (steering off, misalignment fit
+off, L4H off, VBC on, apertures on). Rendered by
+`scripts/make_mbrl_episode_animation.py --seed 1241`; `--scan FIRST LAST` reports
+shots and stages per seed for picking a different one.
+
+**Key numbers.** 8 shots, final score 0.42, **0 screen changes**. The spot goes from
+1518 × 964 µm to 111 × 135 µm against a request of 84 × 142 µm, and transmission
+from 72 % to 99 %. The view zooms from 12.30 mm across to 1.13 mm: the opening beam
+and the final request differ by about seventy times, so no fixed frame shows both.
+The zoom is centred on the request for the whole episode and only ever tightens, so
+the target sits still and the beam comes to it.
+
+**Suggested slide message.** The reference optics gets the size nearly right in one
+shot, the model-based stage trims it, and a single linear solve puts it on the
+requested position — the big step at the end of the score trace. The screen never
+moves, because every BPM is upstream of the readout and BPMs do not intercept; at
+30 s a swap that is 30 s the pipeline never spends.
+
+**Caution.** The episode is one draw. Seed 1241 was chosen for having all three
+stages in it; the median episode takes 6.5 shots and many take 2, because the
+reference optics often lands the size inside the shot-to-shot jitter already. The
+100-episode numbers are in `MBRL_opt/README.md`.
