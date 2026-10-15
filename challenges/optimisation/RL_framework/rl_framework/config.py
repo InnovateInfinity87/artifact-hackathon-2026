@@ -81,9 +81,9 @@ class RLConfig:
     # on the spreads at the top of `sim_env.py`: 0 is the nominal model exactly, 1 is
     # the machine as it realistically differs shot to shot and day to day, and larger
     # values stay a harder version of the same problem rather than a different one.
-    # `reset()` draws a new beam, a new set point and a new survey error from them.
+    # `reset()` draws a new beam and a new survey error from them; the magnets
+    # always start at the strengths the lattice file asks for.
     beam_variation: float = 1.0
-    magnet_variation: float = 1.0
     misalignment_variation: float = 1.0
 
     # What the beam is asked for at the observed screen: (mu_x, mu_y, sigma_x,
@@ -107,6 +107,14 @@ class RLConfig:
     # `beam_variation`, so setting that to 0 leaves the environment deterministic.
     beam_jitter: float = 0.1
 
+    # Power supply ripple: how far a magnet's actual field sits from what it was
+    # set to, as a fraction of the setting, drawn fresh for every magnet on every
+    # step and undone once the shot has been tracked. 0.001 is 0.1%. At 0, the
+    # default, nothing is drawn, written or restored at all. Cavity phases are not
+    # rippled — RF stability is a different mechanism and a fraction of a phase
+    # means nothing.
+    power_supply_ripple: float = 0.0
+
     # Where each magnet's operating range comes from. "current" is what
     # +-`magnet_current_limit` amps reaches through the calibration in
     # `data/clara/lattice_data/utils.py` — what the hardware can physically do.
@@ -117,10 +125,18 @@ class RLConfig:
     magnet_range_source: str = "current"
     magnet_current_limit: float = 100.0  # A
 
+    # Offer the three powered linac cavities' RF phases as knobs, in degrees, each
+    # within `cavity_phase_range` of the phase the lattice file runs it at. Phase
+    # sets the chirp, and so the energy spread the dogleg turns into beam size at
+    # the readout. `score.TUNABLE` allows cavity phases, so a tune that moves one
+    # is scorable; voltage and frequency are not.
+    include_cavity_phases: bool = True
+    cavity_phase_range: float = 30.0  # degrees either side of nominal
+
     # Offer the VBC chicane as a knob: four dipoles on one setting, up to 120 mrad.
-    # It is the only handle in this line on the energy spread at the readout.
-    # Careful: a dipole angle is not in `score.TUNABLE`, so a tune that moves it
-    # fails the benchmark's validation. Set False to keep the action space scorable.
+    # With the cavity phases, it is the handle on the energy spread at the readout.
+    # `score.TUNABLE_BY_NAME` allows the four VBC angles, so a tune that moves them
+    # is scorable; every other dipole in the line is geometry and stays fixed.
     include_vbc_chicane: bool = True
 
     # Magnets the agent may set, by knob name (`<quadrupole>`, `<sextupole>`,

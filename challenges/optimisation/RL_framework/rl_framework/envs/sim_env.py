@@ -52,18 +52,19 @@ is `score.Report.calc_score` for the episode as one case — the mismatch plus
 scored tuner directly, while the reward itself stays dense enough to learn from.
 
 Every `reset()` draws a different machine: a beam of its own size, shape and
-position, magnets sitting a little off the strengths they were asked for, and a
-survey error on the quadrupoles, sextupoles and diagnostics. How far each of those
-is thrown is `config.beam_variation`, `config.magnet_variation` and
-`config.misalignment_variation`, where 0 is the nominal model exactly and 1 is the
-realistic machine. The magnets are the episode's starting point and an agent can
-tune them away; the survey error it is stuck with, as on the real machine. What was
-drawn is in `env.beam_offset`, `env.setpoint` and `env.misalignments`.
+position, and a survey error on the quadrupoles, sextupoles and diagnostics. How far
+each is thrown is `config.beam_variation` and `config.misalignment_variation`, where
+0 is the nominal model exactly and 1 is the realistic machine. The magnets start at
+the strengths the lattice file asks for; the survey error an agent is stuck with, as
+on the real machine. What was drawn is in `env.beam_offset` and `env.misalignments`.
 
-Within an episode the machine then holds still but the beam does not: every step is
-a shot of its own, drawn around the episode's beam at `config.beam_jitter` of
-`config.beam_variation`, and left in `env.shot_offset`. Two identical actions do not
-give identical readings, which is what reading a screen on a real machine is like.
+Within an episode the machine then holds still but a shot of it does not. Every step
+draws its own beam around the episode's, at `config.beam_jitter` of
+`config.beam_variation` and left in `env.shot_offset`, and puts every magnet where
+its power supply actually has it rather than where it was set, at
+`config.power_supply_ripple` of its setting. Both are undone afterwards, so the
+magnets read back what was asked for. Two identical actions do not give identical
+readings, which is what reading a screen on a real machine is like.
 """
 
 from __future__ import annotations
@@ -101,10 +102,10 @@ DTYPE = torch.float32  # what the Cheetah lattice file is parsed into
 
 # What one knob of each magnet type is called, and the suffix its knob name carries.
 PROPERTY_SUFFIX = {"k1": "", "k2": "", "horizontal_angle": "_h", "vertical_angle": "_v",
-                   "angle": ""}
+                   "angle": "", "phase": ""}
 # Half-span for a magnet nothing can give a range for, as in `score._span`.
 FALLBACK_SPAN = {"k1": 3.0, "k2": 50.0, "horizontal_angle": 5e-4,
-                 "vertical_angle": 5e-4, "angle": 0.1}
+                 "vertical_angle": 5e-4, "angle": 0.1, "phase": 30.0}
 # What essentially every CLARA magnet can be driven to, whatever six months of
 # operation happened to use.
 MAGNET_CURRENT_LIMIT = 100.0  # A
@@ -126,20 +127,6 @@ CENTROID_JITTER = np.array([50e-6, 50e-6, 50e-6, 50e-6, 100e-6, 1e-3])
 # the variation: a positive quantity cannot be widened by adding to it.
 SIGMA_SPREAD = 1.3  # rms size of a plane, at constant shape
 BETA_SPREAD = 1.2  # mismatch: size against divergence, at constant emittance
-# Where the magnets sit when the episode starts, against the strengths the lattice
-# file carries. Relative, because a power supply's error follows its set point, plus
-# a floor for the magnets parked at zero — every corrector, in the nominal tune.
-MAGNET_ERROR_RELATIVE = 0.01
-MAGNET_ERROR_FLOOR = {
-    "k1": 1e-3,
-    "k2": 1e-2,
-    "horizontal_angle": 1e-5,
-    "vertical_angle": 1e-5,
-    "angle": 1e-5,
-}
-# Set point errors an operating range has to hold, so the machine never starts
-# outside the range the agent is allowed to work in.
-SETPOINT_HEADROOM = 5
 # Survey error, per plane, as in `score.sample_misalignments`.
 MISALIGNMENT_RMS = 50e-6  # quadrupoles and sextupoles
 DIAGNOSTIC_OFFSET_RMS = 30e-6  # the centring of a camera or a BPM
@@ -243,6 +230,9 @@ class CheetahTransport(Transport):
     def read(self, element: str, prop: str) -> float:
         return float(getattr(self._elements[element], prop))
 
+    # `phase` needs nothing special here: Cheetah stores it on the cavity, in
+    # degrees, and rebuilds the transfer map from it on every track.
+
     def write(self, element: str, prop: str, value: float) -> None:
         setattr(self._elements[element], prop, torch.tensor(value, dtype=DTYPE))
 
@@ -280,17 +270,61 @@ class XsuiteTransport(Transport):
 
     name = "xsuite"
 
-    def __init__(self, model, lattice_json, start, end, energy_ev, stops):
+    # What has to be copied onto each piece of a cavity when it is re-expanded.
+    _CAVITY_FIELDS = {
+        "AxisymmetricThinLens": ("strength", "chromatic_power"),
+        "Cavity": ("voltage", "frequency", "phase"),
+        "ReferenceEnergyIncrease": ("Delta_p0c",),
+    }
+
+    def __init__(self, model, segment, lattice_json, start, end, energy_ev, stops):
         self.converted = model.build_line(energy_ev, lattice_json, start, end)
         self._model = model
+        self._segment = segment
         self._line = self.converted.line
         self._index = {name: i for i, name in enumerate(self._line.element_names)}
         self._stops = [(stop, self._index[stop]) for stop in stops]
+        # The cavities that are actually powered, in order. A cavity at zero volts
+        # converted to a drift and has no phase to set.
+        self._cavities = [
+            element
+            for element in segment.elements
+            if isinstance(element, cheetah.Cavity) and float(element.voltage)
+        ]
+
+    def _expand_cavities(self) -> None:
+        """Rebuild every cavity's slices from the phases the segment now carries.
+
+        A standing-wave cavity becomes some 1300 xsuite elements whose focusing,
+        acceleration and reference-energy steps all depend on the phase and on the
+        energy the beam arrives with, so changing a phase means redoing that
+        arithmetic — and redoing it for every cavity downstream too, because they
+        are each handed the energy the one before left. The numbers come from the
+        nominal model itself rather than a copy of it here, so the two cannot drift
+        apart; only the resulting values are transplanted onto the existing
+        elements, which leaves the line's structure untouched.
+        """
+        energy = self.converted.initial_energy_ev
+        for cavity in self._cavities:
+            pieces, energy = self._model._standing_wave_cavity(
+                cavity.name, cavity, energy
+            )
+            for piece_name, piece in pieces:
+                target = self._line.element_dict[piece_name]
+                for field in self._CAVITY_FIELDS[type(piece).__name__]:
+                    setattr(target, field, getattr(piece, field))
+        self.converted.final_energy_ev = energy
 
     def _element(self, name: str):
         return self._line.element_dict[name]
 
+    def _segment_element(self, name: str):
+        return next(e for e in self._segment.elements if e.name == name)
+
     def read(self, element: str, prop: str) -> float:
+        if prop == "phase":
+            # The sliced line has no single phase to read; the segment holds it.
+            return float(self._segment_element(element).phase)
         target = self._element(element)
         if prop == "horizontal_angle":
             return -float(target.knl[0])  # Cheetah's kick is the opposite of knl
@@ -299,6 +333,10 @@ class XsuiteTransport(Transport):
         return float(getattr(target, prop))
 
     def write(self, element: str, prop: str, value: float) -> None:
+        if prop == "phase":
+            self._segment_element(element).phase = torch.tensor(value, dtype=DTYPE)
+            self._expand_cavities()
+            return
         target = self._element(element)
         if prop == "horizontal_angle":
             target.knl[0] = -value
@@ -387,11 +425,6 @@ def _current_range(element: str, prop: str, amps: float) -> tuple[float, float] 
     except KeyError:
         return None
     return low, high
-
-
-def _setpoint_error_rms(prop: str, nominal: float) -> float:
-    """How far from its asked-for strength a magnet sits, at a variation of 1."""
-    return MAGNET_ERROR_RELATIVE * abs(nominal) + MAGNET_ERROR_FLOOR[prop]
 
 
 def _spread(rng, spread: float, variation: float) -> float:
@@ -515,7 +548,6 @@ class SimEnv(BaseAcceleratorEnv):
         self._nominal_strengths = {
             name: knob.value for name, knob in self._knobs.items()
         }
-        self.setpoint = dict(self._nominal_strengths)
 
         # Elements a survey error can move, and where the lattice file already has
         # them. Quadrupoles and sextupoles, as in `score.sample_misalignments`.
@@ -564,6 +596,12 @@ class SimEnv(BaseAcceleratorEnv):
             }
         )
 
+        # Magnets ripple; a cavity phase is not a value a percentage means
+        # anything against, so it does not.
+        self._rippled = [
+            name for name, knob in self._knobs.items() if knob.prop != "phase"
+        ]
+
         self._rng = np.random.default_rng()
         self.target = self._draw_target()
         self.target_screen = config.target_screen
@@ -581,6 +619,7 @@ class SimEnv(BaseAcceleratorEnv):
         if self.config.backend == XsuiteTransport.name:
             return XsuiteTransport(
                 self.model,
+                self.segment,
                 lattice_json,
                 self.config.lattice_start,
                 self.config.lattice_end,
@@ -604,18 +643,23 @@ class SimEnv(BaseAcceleratorEnv):
         ranges = json.loads(MAGNET_RANGES_JSON.read_text())["elements"]
         overrides = self.config.magnet_limits or {}
         wanted = self.config.controllable_magnets
-        self._error_rms: dict[str, float] = {}
         properties = {
             cheetah.Quadrupole: ("k1",),
             cheetah.Sextupole: ("k2",),
             cheetah.CombinedCorrector: ("horizontal_angle", "vertical_angle"),
         }
+        if self.config.include_cavity_phases:
+            # Only the cavities that are powered: one at zero volts has no phase
+            # worth setting, and converts to a drift in the xsuite line anyway.
+            properties[cheetah.Cavity] = ("phase",)
 
         knobs: dict[str, Knob] = {}
         for element in segment.elements:
             props = next(
                 (p for kind, p in properties.items() if isinstance(element, kind)), ()
             )
+            if isinstance(element, cheetah.Cavity) and not float(element.voltage):
+                continue
             for prop in props:
                 name = element.name + PROPERTY_SUFFIX[prop]
                 knob = Knob(
@@ -631,15 +675,11 @@ class SimEnv(BaseAcceleratorEnv):
                     name, element.name, prop, knob.value, ranges, overrides
                 )
                 knobs[name] = knob
-                self._error_rms[name] = _setpoint_error_rms(prop, knob.value)
 
         if self.config.include_vbc_chicane and all(
             name in {e.name for e in segment.elements} for name in VBC_DIPOLES
         ):
             knobs[VBC_CHICANE] = self._vbc_chicane(ranges, overrides)
-            self._error_rms[VBC_CHICANE] = _setpoint_error_rms(
-                "angle", knobs[VBC_CHICANE].value
-            )
         missing = set(wanted or ()) - set(knobs)
         if missing:
             raise KeyError(
@@ -652,9 +692,10 @@ class SimEnv(BaseAcceleratorEnv):
     def _vbc_chicane(self, ranges, overrides) -> Knob:
         """The VBC as one knob: four dipoles on one setting, alternating in sign.
 
-        Powering it compresses the bunch, which is the only handle in this line on
-        the energy spread at the readout — but a dipole angle is not in
-        `score.TUNABLE`, so a tune that uses it fails the benchmark's validation.
+        Powering it compresses the bunch, which with the cavity phases is the handle
+        in this line on the energy spread at the readout. `score.TUNABLE_BY_NAME`
+        allows these four angles, so a tune that uses them is scorable; every other
+        dipole is the geometry of the machine and stays fixed.
         """
         knob = Knob(
             name=VBC_CHICANE,
@@ -683,11 +724,17 @@ class SimEnv(BaseAcceleratorEnv):
         and will pin an optimiser long before the hardware does.
 
         Either way the range is widened to hold the strength the lattice file
-        carries, plus the set point error an episode can start with, so the machine
-        is never handed over sitting outside the range it may be tuned in.
+        carries, so the tune the model starts from is always inside the range it
+        may be tuned in.
         """
         if name in overrides:
             return float(overrides[name][0]), float(overrides[name][1])
+        if prop == "phase":
+            # Degrees, and a window about the phase the lattice file runs at: the
+            # klystron will go anywhere in 360, but a long way off this one is a
+            # different machine, not a tune of this one.
+            window = self.config.cavity_phase_range
+            return nominal - window, nominal + window
         base = None
         if self.config.magnet_range_source == "current":
             base = _current_range(element, prop, self.config.magnet_current_limit)
@@ -696,8 +743,7 @@ class SimEnv(BaseAcceleratorEnv):
             base = (float(archived[0]), float(archived[1]))
         if base is None:
             base = (-FALLBACK_SPAN[prop], FALLBACK_SPAN[prop])
-        margin = SETPOINT_HEADROOM * _setpoint_error_rms(prop, nominal)
-        low, high = min(base[0], nominal - margin), max(base[1], nominal + margin)
+        low, high = min(base[0], nominal), max(base[1], nominal)
         if high == low:
             low, high = nominal - FALLBACK_SPAN[prop], nominal + FALLBACK_SPAN[prop]
         return low, high
@@ -801,20 +847,42 @@ class SimEnv(BaseAcceleratorEnv):
             float(np.exp(self._rng.uniform(np.log(low), np.log(high)))),
         ])
 
-    def _draw_setpoint(self) -> dict[str, float]:
-        """Magnets near, but not on, the strengths the lattice file asks for."""
-        variation = self.config.magnet_variation
-        self.setpoint = {}
+    def _restore_nominal(self) -> None:
+        """Every magnet and cavity back to what the lattice file asks for, exactly
+        and whatever the limits say."""
         for name, knob in self._knobs.items():
-            nominal = self._nominal_strengths[name]
-            error = (
-                self._rng.normal(0.0, self._error_rms[name] * variation)
-                if variation
-                else 0.0
-            )
-            # Unperturbed, the tune goes back exactly, whatever the limits say.
-            self.setpoint[name] = knob.set(nominal + error, clip=bool(variation))
-        return self.setpoint
+            knob.set(self._nominal_strengths[name], clip=False)
+
+    def _apply_ripple(self) -> dict[str, float] | None:
+        """Put every magnet where its power supply actually has it for this shot.
+
+        A supply holds its output to a fraction of what it was asked for, and that
+        fraction wanders shot to shot, so what the beam sees is never quite the set
+        point. The error is proportional, so a magnet parked at zero does not
+        fluctuate, and it is drawn fresh for every magnet on every shot. Cavity
+        phases are left alone: RF is a different mechanism and a phase is not a
+        value a percentage means anything against.
+
+        Returns what the magnets were set to, for `_restore_setpoint` to put back,
+        or None when there is no ripple to apply and nothing to undo.
+        """
+        fraction = self.config.power_supply_ripple
+        if not fraction:
+            return None
+        errors = self._rng.normal(0.0, fraction, len(self._rippled))
+        commanded = {}
+        for name, error in zip(self._rippled, errors):
+            knob = self._knobs[name]
+            commanded[name] = knob.value
+            knob.set(commanded[name] * (1.0 + error), clip=False)
+        return commanded
+
+    def _restore_setpoint(self, commanded: dict[str, float] | None) -> None:
+        """Undo the ripple: back to the values that were actually set."""
+        if commanded is None:
+            return
+        for name, value in commanded.items():
+            self._knobs[name].set(value, clip=False)
 
     def _draw_misalignments(self) -> dict[str, tuple[float, float]]:
         """A survey error on the magnets, and a centring error on the diagnostics."""
@@ -860,10 +928,16 @@ class SimEnv(BaseAcceleratorEnv):
     # ---------- tracking ----------
 
     def _simulate(self) -> None:
-        """Track the beam to the screen in the beam, reading every BPM on the way.
+        """One shot: the episode's beam jittered again, through magnets sitting
+        where their power supplies actually have them, and read."""
+        commanded = self._apply_ripple()
+        try:
+            self._track()
+        finally:
+            self._restore_setpoint(commanded)
 
-        Every call is a shot of its own: the episode's beam, jittered again.
-        """
+    def _track(self) -> None:
+        """Track the beam to the screen in the beam, reading every BPM on the way."""
         shot, self.shot_offset = self._perturb_beam(
             self._coordinates, self.shot_variation
         )
@@ -1098,7 +1172,7 @@ class SimEnv(BaseAcceleratorEnv):
         self.target = self._draw_target()
         self._coordinates = self._draw_beam()
         self._scored = (0.0, 0.0, 0.0, 0.0, False)
-        self._draw_setpoint()
+        self._restore_nominal()
         self._draw_misalignments()
 
         self.target_screen = self.config.target_screen
