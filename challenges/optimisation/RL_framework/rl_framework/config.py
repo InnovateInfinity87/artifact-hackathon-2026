@@ -15,8 +15,12 @@ class RLConfig:
         "sigma_p": 0.01, "energy": 250e6, "total_charge": 10e-12,
     })
 
-    # Target diagnostic screen — reward minimises beam size here
-    target_screen: str = "cla_s04_dia_scr_03"
+    # The screen the request is for: where every episode starts with the screen in
+    # the beam, and the only screen an episode is scored on. The agent may move the
+    # screen elsewhere to look around, but that costs a shot and brings back no new
+    # reading of the request — the score holds at the last reading of this screen,
+    # as `score.py` measures only at its readout however many screens a tuner used.
+    target_screen: str = "cla_feh_dia_scr_01"
 
     # Magnets the RL agent can control.
     # Each entry: [name, min_native_value, max_native_value]
@@ -81,6 +85,21 @@ class RLConfig:
     beam_variation: float = 1.0
     magnet_variation: float = 1.0
     misalignment_variation: float = 1.0
+
+    # What the beam is asked for at the observed screen: (mu_x, mu_y, sigma_x,
+    # sigma_y) in metres, off the screen's centre. None draws a new request every
+    # episode from the two lines below, as `score.sample_target` does; a 4-tuple
+    # fixes it. The reward is the error against it in units of the requested spot.
+    target: tuple[float, float, float, float] | None = None
+    requested_spot: tuple[float, float] = (80e-6, 400e-6)  # m, log-uniform
+    requested_offset: float = 2e-3  # m, uniform about the screen centre
+
+    # How that error becomes a reward. "log" keeps a gradient however far the beam
+    # is from the request; "linear" is the benchmark's own score, which stops
+    # counting at ten requested spot sizes and so is flat across most of the range
+    # an untuned machine sits in. `info["benchmark_score"]` is the benchmark's
+    # number either way.
+    reward_shape: str = "log"
 
     # Shot-to-shot jitter, as a fraction of `beam_variation`: within an episode the
     # machine holds still, but every step draws its own beam around the episode's,
