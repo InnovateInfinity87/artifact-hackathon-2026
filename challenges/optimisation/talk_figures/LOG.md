@@ -2,6 +2,31 @@
 
 Figures for the CLARA hackathon talk, one section per figure: path (relative to this folder), what it shows, settings, key numbers and a suggested slide message.
 
+## The deck
+
+`talk.html` is the talk: 18 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
+
+```bash
+python3 -m http.server -d . 8000     # then http://localhost:8000/talk.html
+```
+
+Opening `talk.html` as a `file://` URL mostly works too, but serving it is safer: some browsers refuse the animation iframe otherwise.
+
+Keys: arrows or space to move, `f` fullscreen, `o` overview, `b` blank, `s` speaker view. Adding `?print-pdf` to the URL and printing gives a static PDF.
+
+reveal.js 5.1.0 is vendored in `talk_assets/reveal/` (`reveal.js`, `reveal.css`, `theme/white.css`), so the deck needs no network. The one local change is the webfont `@import` removed from `white.css`; it falls back to the system sans.
+
+**The "seven workstreams" slide is the live animation.** It is `workflow_animation.html` in a reveal background iframe, so it animates in the browser and replays every time the slide is entered (reveal reloads background iframes on each visit). Click it to replay by hand. Edit the animation and the slide follows; there is nothing to re-render.
+
+### Stills of the animation
+
+The deck does not need them, but `scripts/make_anim_frames.py` renders `workflow_animation.html` to a numbered PNG sequence in `anim_frames/`, for a poster, a paper or a GIF. It reuses the model and drawing code from the HTML verbatim and only swaps the real-time loop for a deterministic one. Headless chromium screenshots come back blank for this canvas, so the page hands every frame back as a data URL in one `--dump-dom` instead.
+
+```bash
+python3 -I scripts/make_anim_frames.py            # 170 frames, light, 1280x720, 6.7 MB
+python3 -I scripts/make_anim_frames.py --theme dark --fps 12
+```
+
 ## Common settings (geometry and transmission-along-s figures)
 
 - Model: upstream `amylizzle/artifact-hackathon-2026` master at `edfcf46` (includes PR #3 per-element SimFrame apertures and PR #4 VBC on at 118.5 mrad with edge angles).

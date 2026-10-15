@@ -9,15 +9,15 @@ presentation:
 - General Case:
  Steering through the whole CLARA lattice with optimisation and RL techniques, achieving closest possible sim2real matching
  
- - Who Did What:
-  + Francessco: Sim2Real matching with tomography, beam optics
+- Who Did What:
+  + Francessco: Sim2Real matching with tomography, beam optics, multi-fidelity BO 
   + Eiad: Beam optics and SVD to find a good reference tune and the key quadrupoles and correctors for a given target
   + Ivan: numerical optimistation techniques for S04, which was then used with Eiad & Franccessco's beam optics 
   + Manuel: Developing a robust measure for real screen image processing, using a DALIA job to process the whole 0.8TB!
   + Amy: Developed the framework and simulation environment, and built a model based RL agent against it, making use of Eiad's beam optics SVD controls 
  
   
- - Pipeline
+- Pipeline
   - Simulation generates a variation on a realistic beam and lattice, with small perturbations
   - Set nominal optics from lookup table (optics matching)
   - SVD of the correctors vs BPM for the target beam gives us the most significant control variables to center the current beam at the selected optics
