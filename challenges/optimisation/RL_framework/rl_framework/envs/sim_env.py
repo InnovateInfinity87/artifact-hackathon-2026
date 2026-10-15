@@ -138,6 +138,9 @@ REQUESTED_OFFSET = 2e-3  # m
 # What a case books when the beam is lost, and the most any one reading can cost,
 # in units of the spot that was asked for. `score.FAILURE_SCORE`.
 FAILURE_SCORE = 10.0
+# What beam that never arrives costs, as `score.TRANSMISSION_WEIGHT` charges it:
+# delivering half the bunch is worth a spot size.
+TRANSMISSION_WEIGHT = 2.0
 TARGET_LABELS = ("mu_x", "mu_y", "sigma_x", "sigma_y")
 # What shots cost, as `score.Report.calc_score` prices them: EVAL_WEIGHT for every
 # doubling of EVAL_BUDGET, because beam time costs orders of magnitude rather than
@@ -277,8 +280,12 @@ class XsuiteTransport(Transport):
         "ReferenceEnergyIncrease": ("Delta_p0c",),
     }
 
-    def __init__(self, model, segment, lattice_json, start, end, energy_ev, stops):
-        self.converted = model.build_line(energy_ev, lattice_json, start, end)
+    def __init__(
+        self, model, segment, lattice_json, start, end, energy_ev, stops, apertures
+    ):
+        self.converted = model.build_line(
+            energy_ev, lattice_json, start, end, apertures
+        )
         self._model = model
         self._segment = segment
         self._line = self.converted.line
@@ -498,7 +505,7 @@ class SimEnv(BaseAcceleratorEnv):
         # and the screen geometry, which an xsuite line has no notion of (every
         # diagnostic converts to a marker). One of the two models then tracks it.
         self.segment = self.model.cheetah_segment(
-            lattice_json, config.lattice_start, config.lattice_end
+            lattice_json, config.lattice_start, config.lattice_end, config.apertures
         )
 
         self._diagnostics = {
@@ -608,6 +615,7 @@ class SimEnv(BaseAcceleratorEnv):
         self._readings: dict[str, Any] = {}
         self._simulate()
         self._scored = self._readings["stats"]
+        self._scored_transmission = self._readings["transmission"]
 
     # ---------- the model doing the tracking ----------
 
@@ -625,6 +633,7 @@ class SimEnv(BaseAcceleratorEnv):
                 self.config.lattice_end,
                 energy_ev,
                 stops,
+                self.config.apertures,
             )
         raise ValueError(
             f"{self.config.backend!r} is not a backend: "
@@ -1040,9 +1049,12 @@ class SimEnv(BaseAcceleratorEnv):
             # comparable to a scored tuner and lower is better.
             "scored_screen": self.config.target_screen,
             "evaluations": self._step_count,
-            "scored_mismatch": self._mismatch(self._scored),
+            "scored_transmission": self._scored_transmission,
+            "scored_mismatch": self._mismatch(self._scored,
+                                              self._scored_transmission),
             "scored_relative_error": self._relative_error(self._scored),
-            "benchmark_score": self._mismatch(self._scored)
+            "benchmark_score": self._mismatch(self._scored,
+                                              self._scored_transmission)
             + evaluation_cost(self._step_count),
             "mu_x": mu_x,
             "mu_y": mu_y,
@@ -1062,7 +1074,9 @@ class SimEnv(BaseAcceleratorEnv):
             self.target_screen = screen
         self._simulate()
         if self._target_screen == self.config.target_screen:
-            self._scored = self._readings["stats"]  # a fresh reading of the request
+            # a fresh reading of the request, and of how much of it arrived
+            self._scored = self._readings["stats"]
+            self._scored_transmission = self._readings["transmission"]
 
         # Dense: the mismatch every step, and the marginal cost of the shot it took.
         # The costs telescope, so over an episode they come to `evaluation_cost` of
@@ -1109,14 +1123,15 @@ class SimEnv(BaseAcceleratorEnv):
             )
         return dict(zip(self.magnet_names, values)), None
 
-    def _mismatch(self, stats, cap: float = FAILURE_SCORE) -> float:
+    def _mismatch(self, stats, transmission: float,
+                  cap: float = FAILURE_SCORE) -> float:
         """How far a reading is from the request, in requested spot sizes.
 
         `score.per_case_scores` exactly: each component's error against the spot size
-        asked for, position and size weighted equally, clipped at `cap` — which is
-        also what a lost beam books, so losing the beam is never cheaper than
-        delivering a bad one. The benchmark's cap is `FAILURE_SCORE`; the reward
-        looks further, out to `MAX_MISMATCH`.
+        asked for, position and size weighted equally, plus what the beam that never
+        arrived costs, clipped at `cap` — which is also what a lost beam books, so
+        losing the beam is never cheaper than delivering a bad one. The benchmark's
+        cap is `FAILURE_SCORE`; the reward looks further, out to `MAX_MISMATCH`.
         """
         mu_x, mu_y, sigma_x, sigma_y, on_screen = stats
         if not on_screen:
@@ -1124,7 +1139,11 @@ class SimEnv(BaseAcceleratorEnv):
         error = np.abs(
             np.array([mu_x, mu_y, sigma_x, sigma_y]) - self.target
         ) / float(self.target[2:].mean())
-        return float(min((error[0] + error[1]) / 2 + (error[2] + error[3]) / 2, cap))
+        return float(min(
+            (error[0] + error[1]) / 2 + (error[2] + error[3]) / 2
+            + TRANSMISSION_WEIGHT * (1.0 - transmission),
+            cap,
+        ))
 
     def _relative_error(self, stats) -> float:
         """`score.CaseResult.relative_error`: the mean component error in requested
@@ -1156,13 +1175,14 @@ class SimEnv(BaseAcceleratorEnv):
         """
         stats = (mu_x, mu_y, sigma_x, sigma_y, on_screen)
         if self.config.reward_shape == "linear":
-            return -self._mismatch(stats)
+            return -self._mismatch(stats, self._scored_transmission)
         if self.config.reward_shape != "log":
             raise ValueError(
                 f"{self.config.reward_shape!r} is not a reward shape: "
                 f"'log' or 'linear'."
             )
-        return -float(np.log1p(self._mismatch(stats, cap=MAX_MISMATCH)))
+        return -float(np.log1p(self._mismatch(
+            stats, self._scored_transmission, cap=MAX_MISMATCH)))
 
     # ---------- base class hooks ----------
 
@@ -1171,13 +1191,14 @@ class SimEnv(BaseAcceleratorEnv):
         screen. With every variation at 0 this is the nominal model exactly."""
         self.target = self._draw_target()
         self._coordinates = self._draw_beam()
-        self._scored = (0.0, 0.0, 0.0, 0.0, False)
+        self._scored, self._scored_transmission = (0.0, 0.0, 0.0, 0.0, False), 0.0
         self._restore_nominal()
         self._draw_misalignments()
 
         self.target_screen = self.config.target_screen
         self._simulate()
         self._scored = self._readings["stats"]
+        self._scored_transmission = self._readings["transmission"]
         return self._get_obs()
 
     def _apply_action(self, native_values: np.ndarray):
