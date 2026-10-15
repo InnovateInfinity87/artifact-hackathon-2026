@@ -4,7 +4,7 @@ Figures for the CLARA hackathon talk, one section per figure: path (relative to 
 
 ## The deck
 
-`talk.html` is the talk: 23 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
+`talk.html` is the talk: 24 slides, 16:9, reveal.js, built from `notes.txt` and the figures here. Serve this folder and open it:
 
 ```bash
 python3 -m http.server -d . 8000     # then http://localhost:8000/talk.html
@@ -20,7 +20,9 @@ reveal.js 5.1.0 is vendored in `talk_assets/reveal/` (`reveal.js`, `reveal.css`,
 
 Figures used: `geometry/line_geometry_apertures_nominal_beam.png`, `transmission_along_s/losses_by_section_vbc_on.png`, `optics_nodes/transmission_matrix_vbc_on.png`, `optics_nodes/rematch_vbc_on.png`, `mfopt/mfopt_workflow.svg` (an `<img>`, so its internal CSS is honoured and it stays sharp at any size) and `screens/`. `screens/` holds copies of `image_processing/Noisy_beam.png` and `Weak_beam.png`: the deck must not reference paths above its own folder, or serving this directory breaks the images.
 
-Numbers on the slides come from `MFopt/README.md` (30 days, seeds 1000-1029), `MBRL_opt/README.md` and its `results*.json` (32 episodes, seeds 1234-1265), `section-opt/section_review.md` (the S04 method comparison) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
+Numbers on the slides come from `MFopt/README.md` (30 days, seeds 1000-1029, second order, L4H off), `MBRL_opt/README.md` and its `results_100.json` / `results_ablation.json` (100 episodes, seeds 1234-1333, L4H off; the 12-episode ablation is where the steering number comes from), `model-svd_opt/VALIDATION.md` and `results/cheetah_100_episodes/metrics.json` (100 episodes, seeds 42-141), `section-opt/section_review.md` (the S04 method comparison) and `orbit_matching/README.md` (the Cheetah/xsuite transmission cross-check). Re-run those and the slides need re-reading.
+
+The three tuners were measured on different seeds and budgets, so the slides never put their scores in one table. MFopt and MBRL_opt now at least run the same machine (L4H off); `model-svd_opt` spends about 190 steps a branch, so its score carries a much larger cost term. If that ever becomes one run, it becomes one table.
 
 ### Stills of the animation
 

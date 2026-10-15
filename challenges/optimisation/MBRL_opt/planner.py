@@ -412,8 +412,21 @@ def _pseudo_inverse(matrix: np.ndarray, cutoff: float) -> np.ndarray:
     would simply saturate the supplies. `svd_correction.svd_pseudo_inverse` does the
     same for the same reason.
     """
-    u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+    # A probe that threw the beam away measures no response at all, and comes back
+    # as NaN or infinity; LAPACK will not decompose that and raises rather than
+    # returning anything. Zeroing those entries says the right thing — that knob
+    # moved nothing we could see — and leaves the rest of the matrix usable.
+    matrix = np.nan_to_num(
+        np.asarray(matrix, dtype=float), nan=0.0, posinf=0.0, neginf=0.0
+    )
+    empty = np.zeros((matrix.shape[1], matrix.shape[0]))
+    if not matrix.size or not np.any(matrix):
+        return empty
+    try:
+        u, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return empty
     keep = int(np.sum(singular > cutoff * singular[0])) if singular.size else 0
     if not keep:
-        return np.zeros((matrix.shape[1], matrix.shape[0]))
+        return empty
     return vt[:keep].T @ np.diag(1 / singular[:keep]) @ u[:, :keep].T

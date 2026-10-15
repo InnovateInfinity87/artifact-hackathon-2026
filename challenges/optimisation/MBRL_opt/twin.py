@@ -549,6 +549,12 @@ class CheetahTwin:
         """
         if not isinstance(value, torch.Tensor):
             value = torch.tensor(float(value), dtype=DTYPE)
+        if not bool(torch.isfinite(value).all()):
+            # The last line of defence. A magnet strength that is not a number makes
+            # Cheetah refuse to track at all — the beam energy stops being positive
+            # and the episode dies — so a bad value is dropped here and the knob
+            # stays where it was, rather than taking the run down with it.
+            value = torch.full_like(value, float(self.setting(element, prop)))
         self._written.add((element, prop))
         if element == VBC_CHICANE:
             for dipole, sign in zip(VBC_DIPOLES, VBC_SIGNS):

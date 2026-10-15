@@ -1,8 +1,8 @@
 # MBRL_opt — the model-based RL stage of the tuning pipeline
 
 Getting a `SimEnv` episode — a new day on CLARA, with its own beam, its own survey
-error and a request for a spot at `cla_feh_dia_scr_01` — onto that spot in around
-twenty-five shots.
+error and a request for a spot at `cla_feh_dia_scr_01` — onto that spot in about six
+shots, without ever moving a screen.
 
 This is the last stage of the team pipeline and it sits on the other stages rather
 than replacing them: it takes the reference optics and the SVD control rankings from
@@ -18,20 +18,20 @@ request (mu_x, mu_y, sigma_x, sigma_y)
      46 quadrupole k1s that give the requested size
         │                                                         1 shot to load
         ▼
-2. steer                 SVD: correctors vs BPMs at that optics
-     leading corrector planes, response from the twin, inverted    1–4 shots
+  (steer               SVD: correctors vs BPMs — implemented, off by default,
+                       because on this machine it makes things worse. See below.)
         │
         ▼
-3. control set           SVD: leading quadrupoles, plus the
+2. control set           SVD: leading quadrupoles, plus the
      sextupoles, RF phases and chicane                             no shots
         │
         ▼
-4. match the size        differentiable twin + CEM/Adam            ~20 shots
+3. match the size        differentiable twin + CEM/Adam            0–12 shots
      fit what the machine is, plan against it, re-read the camera
      scores the spot size and transmission only
         │
         ▼
-5. place the spot        SVD: final correctors vs readout centroid  1 shot
+4. place the spot        SVD: final correctors vs readout centroid  1 shot
      two-row least squares, not a search
 ```
 
@@ -39,7 +39,19 @@ request (mu_x, mu_y, sigma_x, sigma_y)
 quadrupoles and scores only the size; where the spot lands is settled afterwards by
 the two correctors nearest the screen, in a single linear solve. Put the two in one
 optimiser and a quadrupole will happily fix a 2 mm position error by distorting the
-optics — which it can do, and which costs the size the focus just bought.
+optics — which it can do, and which costs the size the focus just bought. Separating
+them took the score from 2.66 in 25 shots to 0.29 in 6 on the seed they were first
+compared on.
+
+**The BPM steering is off by default, on measurement.** Over 12 episodes, running it
+scored 1.485 and skipping it 0.525, for 3.5 fewer shots. The stage is not broken;
+there is nothing here for it to do. The reference optics already arrives with 99 %
+transmission and all 31 BPMs reading, so there is no beam to recover — and flattening
+the *measured* orbit steers the beam onto the BPM centres rather than the magnetic
+axis, because each BPM carries its own 30 µm centring error. Ten correctors chasing
+62 such readings put a real distortion on a trajectory that was fine. It is kept, and
+`steering_shots` turns it back on, because a machine that really has lost the beam —
+`score.py`'s bad set points rather than SimEnv's — is exactly what it is for.
 
 ## Why it is shaped like this
 
@@ -106,49 +118,73 @@ to linear. An episode is two to three minutes; most of it is the twin.
 | `screen.py` | the robust camera measure, wrapping `image_processing` |
 | `config.py` | `MBRLConfig` |
 | `baselines.py` | the pipeline with its later stages removed |
+| `dyna.py` | a `CheetahTwin` dressed as the environment, so episodes cost no beam |
+| `features.py` | the episode-independent view a policy sees: SVD rank slots, not named magnets |
+| `policy.py`, `train.py` | the Dyna layer: clone the planner inside the twin |
 | `evaluate.py`, `smoke_test.py` | the comparison and the checks |
 
 ## Results
 
-32 episodes, seeds 1234–1265, at SimEnv's defaults (`beam_variation` 1.0,
-`misalignment_variation` 1.0, shot jitter and the VBC on). Every method sees the same
-episodes. Score is the mean `info["benchmark_score"]`, which is
+**100 episodes**, seeds 1234–1333, at SimEnv's defaults (`beam_variation` 1.0,
+`misalignment_variation` 1.0, shot jitter, apertures, VBC on, L4H off). Every method
+sees the same episodes. Score is the mean `info["benchmark_score"]`, which is
 `score.Report.calc_score` for one episode — mismatch in requested spot sizes, plus
 `TRANSMISSION_WEIGHT` for the bunch that never arrived, plus the shot cost. Lower is
-better. The hit columns are `score.HIT_TOLERANCES`: the fraction of episodes whose
-mean component error came inside 50 %, 25 % and 10 % of the requested spot.
+better. The hit columns are `score.HIT_TOLERANCES`.
 
-| method | score | median | mismatch | shots | <50% | <25% | <10% |
-|---|---|---|---|---|---|---|---|
-| **full pipeline, survey error fitted** | **0.95** | **0.66** | 0.65 | 25.2 | 91 % | 84 % | 41 % |
-| full pipeline | 1.44 | 0.78 | 1.14 | 25.6 | 81 % | 72 % | 25 % |
-| optics + steering | 5.88 | 6.23 | 5.81 | 5.0 | 6 % | 0 % | 0 % |
-| reference optics only | 6.12 | 7.25 | 6.10 | 1.0 | 0 % | 0 % | 0 % |
-| do nothing | 9.51 | 10.00 | 9.51 | 0 | 0 % | 0 % | 0 % |
+| method | score | median | shots | screen switches | wall s/ep | <50% | <25% | <10% |
+|---|---|---|---|---|---|---|---|---|
+| **full pipeline** | **0.77** | **0.57** | 6.5 | **0** | 1086 | 86 % | 60 % | 21 % |
+| optics + placement | 1.00 | 0.81 | 2.0 | **0** | 7.5 | 62 % | 36 % | 8 % |
+| reference optics only | 6.79 | 6.93 | 1.0 | **0** | 5.0 | 3 % | 2 % | 0 % |
+| do nothing | 9.65 | 10.00 | 0 | **0** | 0 | 0 % | 0 % | 0 % |
 
-Read down the table: the reference optics takes a failed episode to 6.1 in one shot,
-steering is worth a little more, and the model-based tweak does the rest — 5.9 down to
-0.95, with a median of 0.66 and 41 % of episodes landing inside a tenth of the
-requested spot. Every method delivers beam on every episode.
+Against the four figures of merit:
 
-The reference optics scoring 6.1 is not the lookup being wrong: on its own model it
-hits the requested size to a fraction of a percent. It is the cost of the request
-naming a *position* the matched family never matched for, plus the episode's own beam
-and survey error. That is precisely the gap stage 4 exists to close.
+- **Screen switches: zero, always.** Not a tuning result but a design one. All 31
+  BPMs sit upstream of `cla_feh_dia_scr_01`, and BPMs do not intercept the beam, so
+  the readout screen can stay in for the whole episode. At 30 s a swap, the pipeline
+  never spends any of it. `EpisodeResult.screen_switches` counts them so this stays
+  true if the design changes.
+- **Shots: 6.5 on average**, and 2 of those are fixed overhead — one to load the
+  optics, one to place the spot. The focus takes the other 4.5 and often takes none
+  at all, because the reference optics frequently lands the size inside the
+  shot-to-shot jitter already. At `EVAL_BUDGET` 50 this costs 0.06 of the score.
+- **Match: 0.77 mean, 0.57 median**, 86 % of episodes inside half a requested spot
+  and 21 % inside a tenth. Beam delivered on 100 % of episodes.
+- **Wall clock: ~18 minutes per episode** of model time on a 64-core container at
+  about half a laptop's per-core speed (the 1086 s above is per-episode wall under
+  50-way contention). None of it is beam time. The optics lookup is ~40 s and the
+  rest is the twin: the focus is the expensive stage, which is why it is worth
+  stopping it as soon as it is inside the noise.
 
-**Fitting the survey error is worth a third of the score**, 1.44 to 0.95, and takes
-the hit rate inside a tenth of the requested spot from 25 % to 41 %. It is still off
-by default, so the aligned twin is the baseline and this is an ablation you switch on
-with `--fit-misalignments`; on this evidence it should probably become the default. A
-misaligned quadrupole kicks and a misaligned sextupole focuses, and no amount of
-adjusting where the beam was launched imitates either.
+The jump from 6.79 to 1.00 is one shot of placement, and the jump from 1.00 to 0.77
+is the model-based focus. Both matter, and they are very different kinds of thing:
+the first is a two-row linear solve, the second is 4.5 shots of search against a
+fitted twin.
 
-Reproduce with `evaluate.py --episodes 32 --seed 1234 --workers 32`, adding
-`--fit-misalignments` for the first row. Numbers are in `results.json` and
-`results_fitmis.json`. These were run on the 64-core apml1 container, which is about
-half the per-core speed of a laptop and ran 32 episodes of all four methods in around
-40 minutes. Give `--workers` at least as many slots as there are episodes, or the
-leftovers queue for a whole second wave.
+### What each stage is worth, and the steering ablation
+
+12 episodes, seeds 1234–1245, same conditions:
+
+| variant | score | median | shots |
+|---|---|---|---|
+| optics + focus + placement (default) | **0.53** | 0.40 | 6.0 |
+| optics + steering + placement | 0.63 | 0.49 | 5.9 |
+| optics + steering + focus + placement | 1.49 | 0.73 | 9.5 |
+| optics only | 6.99 | 7.91 | 1.0 |
+
+Every variant that includes the BPM steering is worse than the one without it, and
+pays 3.5 extra shots for the privilege. That is why `steering_shots` defaults to 0;
+see the note above for why the stage has nothing to do on this machine.
+
+The misalignment fit (`--fit-misalignments`) was worth about a third of the score on
+the earlier, coupled version of the pipeline (1.44 against 0.95 over 32 episodes). It
+has not been re-measured since the split and the numbers above are with it off.
+
+Reproduce with `evaluate.py --episodes 100 --seed 1234 --workers 50`. Numbers are in
+`results_100.json` and `results_ablation.json`. Give `--workers` at least as many
+slots as there are episodes, or the leftovers queue for a whole extra wave.
 
 ### Cost per episode
 
@@ -210,6 +246,12 @@ quadrupoles. It would earn its place on a machine that had lost the beam.
 baseline, but a survey error does things no launch offset can imitate.
 `--fit-misalignments`.
 
-**Not built: the Dyna layer.** The twin is a free simulator, so the natural next step
-is to randomise the latent, roll out inside it, and train a policy that proposes the
-first move — turning a twenty-shot MPC tweak into a few shots plus a refinement.
+**The Dyna layer is built but untrained.** `dyna.py` dresses a `CheetahTwin` as the
+environment so the agent runs against it unmodified; `train.py` rolls episodes
+through it, records what the planner decided, and `policy.py` clones those decisions
+into a network that proposes the focus move as a warm start. All of it is verified
+end to end — a twin episode converges 9.75 → 0.67 and yields usable pairs, and the
+cloning fits — but no policy has been trained at scale, and the case for one is now
+weaker than it was: the focus is down to ~4.5 shots and often zero, so a policy would
+buy wall-clock rather than shots or score. Worth revisiting only after the size
+residual below.

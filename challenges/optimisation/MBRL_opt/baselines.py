@@ -31,9 +31,15 @@ def _staged(env, twin, config, seed, stages: str):
     """Run the agent with its later stages switched off."""
     agent = MBRLAgent(config, twin)
     if stages == "optics":
-        agent.config = _without(config, steering_shots=0, focus_shots=0)
+        agent.config = _without(
+            config, steering_shots=0, focus_shots=0, placement_shots=0
+        )
     elif stages == "steered":
+        agent.config = _without(config, focus_shots=0, placement_shots=0)
+    elif stages == "placed":
         agent.config = _without(config, focus_shots=0)
+    elif stages == "focused":
+        agent.config = _without(config, steering_shots=0)
     agent.planner.config = agent.config
     return agent.run(env, seed=seed)
 
@@ -85,8 +91,25 @@ def optics_steered(env, twin: CheetahTwin, config: MBRLConfig, seed=None):
     return _staged(env, twin, config, seed, "steered")
 
 
+def optics_placed(env, twin: CheetahTwin, config: MBRLConfig, seed=None):
+    """Reference optics, steering, and the placement — everything but the focus.
+
+    The one to compare the agent against: it is the whole pipeline with the
+    model-based stage removed, so the difference is what that stage is worth.
+    """
+    return _staged(env, twin, config, seed, "placed")
+
+
+def no_steering(env, twin: CheetahTwin, config: MBRLConfig, seed=None):
+    """The pipeline with the BPM steering skipped, to see whether it earns its
+    shots. The reference optics already delivers beam, so it may not."""
+    return _staged(env, twin, config, seed, "focused")
+
+
 BASELINES = {
     "do-nothing": do_nothing,
     "optics-only": optics_only,
     "optics-steered": optics_steered,
+    "optics-placed": optics_placed,
+    "no-steering": no_steering,
 }

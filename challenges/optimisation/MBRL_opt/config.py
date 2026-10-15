@@ -82,7 +82,16 @@ class MBRLConfig:
     # EVAL_BUDGET (50) shots, so the cost of a shot is real but gentle: 40 shots cost
     # 0.34 of a requested spot size, 80 cost 0.58. These defaults sit just under one
     # budget so the tune is paid for at roughly a third of a spot.
-    steering_shots: int = 4
+    # Zero, on measurement. Over 12 episodes, running the BPM steering scored 1.485
+    # and skipping it 0.525, for 3.5 fewer shots — it is not that the stage is badly
+    # implemented, it is that there is nothing here for it to do. The reference
+    # optics already arrives with 99 % transmission and every BPM reading, so there
+    # is no beam to recover, and flattening the *measured* orbit steers onto the BPM
+    # centres rather than the magnetic axis: each BPM carries its own 30 µm centring
+    # error, and ten correctors chasing 62 such readings put a real distortion on a
+    # trajectory that was fine. Raise it on a machine that has actually lost the
+    # beam — `score.py`'s bad set points, rather than SimEnv's.
+    steering_shots: int = 0
     focus_shots: int = 12
 
     # Stop steering early once the orbit is this flat (m, rms over valid BPMs) and

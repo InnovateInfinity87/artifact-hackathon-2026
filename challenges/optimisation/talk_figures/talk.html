@@ -163,7 +163,8 @@
             of optics.</li>
         <li>And the model is not the machine.</li>
       </ul>
-      <p class="footnote">VBC at 118.5 mrad; at the 131.7 mrad default it is 72%.</p>
+      <p class="footnote">VBC at 118.5 mrad, L4H powered. At the 131.7 mrad default it is
+        72%, and the machine model now runs L4H off &mdash; a drift, iris still in place.</p>
     </div>
     <div class="col narrow">
       <figure>
@@ -185,8 +186,9 @@
         VBC-on rematch, and the multi-fidelity BO pipeline: twin as low fidelity,
         machine as high fidelity.</td></tr>
       <tr><td>Eiad</td><td>Beam optics and SVD: the reference tune, which quadrupoles and
-        correctors matter for a given target, and per-node orbit response matrices
-        cross-checked in Cheetah and xsuite.</td></tr>
+        correctors matter for a given target, per-node orbit responses cross-checked in
+        Cheetah and xsuite &mdash; and the staged SVD tuner that runs the whole pipeline
+        on the machine.</td></tr>
       <tr><td>Ivan</td><td>Numerical optimisation section by section &mdash; response-matrix
         correction, BO, RCDS, RCDS+BO and PPO, all on the same image budget.</td></tr>
       <tr><td>Manuel</td><td>A robust measure for real screen images, and a filter for the
@@ -222,14 +224,14 @@
     <div class="cost">no shots</div>
     <div class="arrow">&darr;</div><div></div>
     <div class="step"><strong>4. Steering</strong> &mdash; simple optimisation, typically 1 iteration, 4 at worst</div>
-    <div class="cost">1&ndash;4 shots</div>
+    <div class="cost">1&ndash;4 shots, or 0</div>
     <div class="arrow">&darr;</div><div></div>
     <div class="step"><strong>5. Focus SVD</strong> &mdash; quadrupoles and correctors together, for focusing</div>
     <div class="cost">no shots</div>
     <div class="arrow">&darr;</div><div></div>
     <div class="step"><strong>6. Tweak the matched tune</strong> &mdash; numerical optimisation or the RL agent,
       <em>focusing only</em></div>
-    <div class="cost">~10&ndash;20 shots</div>
+    <div class="cost">4&ndash;8 shots</div>
     <div class="arrow">&darr;</div><div></div>
     <div class="step"><strong>7. Read the screen</strong> with the robust measure, and go round again</div>
     <div class="cost">every shot</div>
@@ -249,6 +251,8 @@
         perturbations, a survey error, and a request.</li>
     <li>Cheetah 0.8.4, second-order tracking, apertures on, 200k particles for the
         reference work and 50k for the sweeps.</li>
+    <li><strong>L4H is off</strong>, as it is on the machine: tracked as a drift of its
+        own length, with its 4.12 mm iris still there to lose beam on.</li>
     <li>The agent sees what an operator sees: BPM centroids, and screens that cost a shot.</li>
   </ul>
   <div class="choice">
@@ -335,12 +339,17 @@
         99 &micro;m rms quadrupole offsets to <strong>6 / 15 &micro;m</strong> (x / y)
         from BPMs alone.</li>
     <li>Typically 1 iteration in the pipeline, 4 in the worst case.</li>
+    <li><strong>And on a healthy machine, we measured it doing nothing.</strong> Every
+        pipeline variant that includes the BPM steering scores <em>worse</em> than the one
+        without it, and pays 3.5 extra shots for it: 0.53 without, 1.49 with. It now
+        defaults to zero shots.</li>
   </ul>
   <div class="choice">
     <b class="c">Choice:</b> BPM-only one-shot correction as the first stage.<br>
-    <b class="k">Cost:</b> not enough on its own for 80&ndash;400 &micro;m spots: the
-    centroid at the screen still sits at 0.4&ndash;1.6 mm depending on the survey error,
-    and the residual is dominated by quadrupole offsets. Good opening move, not an answer.
+    <b class="k">Cost:</b> the reference optics already delivers beam to every BPM, so
+    there is nothing to recover and the orbit bottoms out around 550 &micro;m anyway
+    &mdash; a handful of correctors against a survey error on 46 quadrupoles. It earns its
+    place on the day the beam is <em>lost</em>, not on the day it is merely off centre.
   </div>
 </section>
 
@@ -409,9 +418,10 @@
       <p class="eqn">&#375;(&delta;) = y<sub>meas</sub> + [ twin(k+&delta;) &minus; twin(k) ]</p>
       <p>A model wrong by a constant still predicts the <em>effect</em> of a move, and
          anchoring cancels the constant exactly.</p>
-      <p><strong>The machine is 1% of the arithmetic.</strong> An episode spends 25 shots
-         and 290k particle-tracks on the machine; the twin spends 30.7 M across 611 calls.
-         That is the whole point &mdash; only the shots cost beam time.</p>
+      <p><strong>Nearly all the arithmetic is the twin&rsquo;s.</strong> An episode is
+         about eighteen minutes of model time and <strong>6.5 shots</strong> on the
+         machine &mdash; and the focus stops as soon as it is inside the jitter, so often
+         it is fewer. That is the whole point: only the shots cost beam time.</p>
     </div>
     <div class="col">
       <h3>Two things that mattered</h3>
@@ -424,6 +434,45 @@
             takes its <em>value</em> from the hard edge and its <em>gradient</em> from a
             sigmoid. Blurring the wall outright moved the predicted loss from 0.00 to
             114.7 and the fit walked off chasing it.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>6. Tweak the tune, three: BO and RCDS inside the SVD subspace</h2>
+  <div class="cols">
+    <div class="col">
+      <ul>
+        <li>The same four stages, run straight on the machine: calibrate and reset,
+            <strong>thread</strong>, correct the <em>measured</em> size, centre on the screen.</li>
+        <li>The search never leaves the <strong>five dominant quadrupole modes</strong>,
+            and the modal boxes are sized so every proposal is already inside every
+            magnet limit &mdash; no clipping, ever.</li>
+        <li>Two branches from the same replayed start, same budget: <strong>BO</strong>
+            (joint GP, EI then LCB) and <strong>RCDS</strong>.</li>
+        <li>Threading earns its keep: on the stress case &mdash; 0.3 mm request,
+            five times the survey error &mdash; the beam starts at
+            <strong>1.4% transmission reaching 24 of 31 BPMs</strong>, and comes back to
+            all 31 and a valid screen before either optimiser starts.</li>
+      </ul>
+    </div>
+    <div class="col">
+      <table>
+        <thead><tr><th>100 episodes, 1&times;1 mm</th><th class="num">Score</th><th class="num">Median</th></tr></thead>
+        <tbody>
+          <tr><td>BO branch</td><td class="num">1.57</td><td class="num">1.52</td></tr>
+          <tr><td>RCDS branch</td><td class="num">1.49</td><td class="num">1.40</td></tr>
+        </tbody>
+      </table>
+      <p class="footnote">Seeds 42&ndash;141, Cheetah, 10k particles, three shots per
+        evaluation; 98 of 100 episodes finished. The score carries a cost term and these
+        branches spend about 190 steps, so it is not comparable with the tables to come.</p>
+      <ul style="margin-top:0.4em;">
+        <li>Delivered, on a 1 mm request: <strong>98.4% transmission</strong> at
+            1.06 &times; 0.98 mm, centroid inside 40 &micro;m.</li>
+        <li>Run again through <strong>xsuite</strong> instead of Cheetah, the same workflow
+            lands in the same place.</li>
       </ul>
     </div>
   </div>
@@ -470,6 +519,10 @@
         the screen: a <strong>two-row least squares</strong>, one shot. Not a search.</li>
     <li>The request puts the spot anywhere within 2 mm of the screen centre &mdash; about
         eight requested spot sizes, and most of the score. It is worth a step of its own.</li>
+    <li><strong>It is the best shot in the whole pipeline.</strong> Reference optics
+        alone scores 6.79. Add that one linear solve and it is <strong>1.00</strong>,
+        with 62% of days already inside half a requested spot. Everything clever that
+        follows is worth another 0.23.</li>
   </ul>
   <div class="choice">
     <b class="c">Choice:</b> separate the two, rather than optimising size and position
@@ -552,26 +605,30 @@
       </tr>
     </thead>
     <tbody>
-      <tr><td>Do nothing</td><td class="num">9.37</td><td class="num">10.00</td><td class="num">0%</td><td class="num">0%</td><td class="num">0</td></tr>
-      <tr><td>Optics only</td><td class="num">6.50</td><td class="num">6.22</td><td class="num">0%</td><td class="num">0%</td><td class="num">1</td></tr>
+      <tr><td>Do nothing</td><td class="num">9.30</td><td class="num">10.00</td><td class="num">0%</td><td class="num">0%</td><td class="num">0</td></tr>
+      <tr><td>Optics only</td><td class="num">6.99</td><td class="num">7.05</td><td class="num">0%</td><td class="num">0%</td><td class="num">1</td></tr>
       <tr><td>Stage A <span class="muted">(optics, thread, steer)</span></td>
-          <td class="num">0.49</td><td class="num">0.38</td><td class="num">30%</td><td class="num">73%</td><td class="num">4.6</td></tr>
+          <td class="num">0.59</td><td class="num">0.47</td><td class="num">17%</td><td class="num">67%</td><td class="num">4.7</td></tr>
       <tr><td><strong>Stage A + MF-BO</strong></td>
-          <td class="num good"><strong>0.32</strong></td><td class="num good"><strong>0.25</strong></td>
-          <td class="num good"><strong>77%</strong></td><td class="num">97%</td><td class="num">10.2</td></tr>
+          <td class="num good"><strong>0.41</strong></td><td class="num good"><strong>0.36</strong></td>
+          <td class="num good"><strong>53%</strong></td><td class="num">87%</td><td class="num">7.9</td></tr>
     </tbody>
   </table>
-  <p class="footnote" style="text-align:center;">30 days, seeds 1000&ndash;1029. Score is
-    the benchmark score; lower is better.</p>
+  <p class="footnote" style="text-align:center;">30 days, seeds 1000&ndash;1029, on the
+    second-order lattice with L4H off. Score is the benchmark score; lower is better.</p>
   <ul style="margin-top:0.6em;">
-    <li><strong>Stage A is five shots and does most of the work</strong> &mdash; 9.37 to
-        0.49 &mdash; because the optics come out of the model for free.</li>
-    <li>MF-BO spends five more shots and takes the hit rate inside a tenth of the
-        requested spot from 30% to <strong>77%</strong>.</li>
+    <li><strong>Stage A is five shots and does most of the work</strong> &mdash; 9.30 to
+        0.59 &mdash; because the optics come out of the model for free.</li>
+    <li>MF-BO spends three more and is worth <strong>0.18 &plusmn; 0.04 a day</strong>,
+        paired over the 30. Every episode finishes inside the 50-step budget &mdash; the
+        longest was 20 &mdash; with at least 85% of the bunch on the screen.</li>
     <li>On 12 deliberately lost-beam days (&times;5 misalignment) it still gets there:
-        0.37, 75% within 10%, 13 steps. Stage A threads the beam back first.</li>
-    <li>Every episode finishes inside the 50-step budget &mdash; the longest was 32 &mdash;
-        with beam on the screen.</li>
+        0.49, a third of them within 10%, 13 steps. Stage A threads the beam back first.</li>
+    <li><strong>What is left is mostly not the optimiser.</strong> Launch jitter now
+        reaches the spot through second-order chromatic terms, so &sigma;<sub>x</sub>
+        wanders 175 to 270 &micro;m at fixed settings on a 200 &micro;m request. The score
+        is one reading, so that alone is a floor of 0.2 to 0.3.</li>
+    <li>And below about 0.13 mm in x, FEH Q2 runs out of magnet.</li>
   </ul>
 </section>
 
@@ -585,26 +642,30 @@
       </tr>
     </thead>
     <tbody>
-      <tr><td>Do nothing</td><td class="num">9.51</td><td class="num">10.00</td><td class="num">0</td><td class="num">0%</td><td class="num">0%</td><td class="num">0%</td></tr>
-      <tr><td>Reference optics only</td><td class="num">6.12</td><td class="num">7.25</td><td class="num">1</td><td class="num">0%</td><td class="num">0%</td><td class="num">0%</td></tr>
-      <tr><td>Optics + steering</td><td class="num">5.88</td><td class="num">6.23</td><td class="num">5.0</td><td class="num">6%</td><td class="num">0%</td><td class="num">0%</td></tr>
-      <tr><td>Full pipeline</td><td class="num">1.44</td><td class="num">0.78</td><td class="num">25.6</td><td class="num">81%</td><td class="num">72%</td><td class="num">25%</td></tr>
-      <tr><td><strong>+ survey error fitted</strong></td>
-          <td class="num good"><strong>0.95</strong></td><td class="num good"><strong>0.66</strong></td>
-          <td class="num">25.2</td><td class="num">91%</td><td class="num">84%</td>
-          <td class="num good"><strong>41%</strong></td></tr>
+      <tr><td>Do nothing</td><td class="num">9.65</td><td class="num">10.00</td><td class="num">0</td><td class="num">0%</td><td class="num">0%</td><td class="num">0%</td></tr>
+      <tr><td>Reference optics only</td><td class="num">6.79</td><td class="num">6.93</td><td class="num">1.0</td><td class="num">3%</td><td class="num">2%</td><td class="num">0%</td></tr>
+      <tr><td>Optics + placement</td><td class="num">1.00</td><td class="num">0.81</td><td class="num">2.0</td><td class="num">62%</td><td class="num">36%</td><td class="num">8%</td></tr>
+      <tr><td><strong>Full pipeline</strong></td>
+          <td class="num good"><strong>0.77</strong></td><td class="num good"><strong>0.57</strong></td>
+          <td class="num">6.5</td><td class="num">86%</td><td class="num">60%</td>
+          <td class="num good"><strong>21%</strong></td></tr>
     </tbody>
   </table>
-  <p class="footnote" style="text-align:center;">32 episodes, seeds 1234&ndash;1265 &mdash;
-    a different draw of days from the table before, so read the columns, not the two
-    tables against each other.</p>
+  <p class="footnote" style="text-align:center;">100 episodes, seeds 1234&ndash;1333, same
+    machine as the table before (L4H off) but a different draw of days. Beam delivered on
+    every one.</p>
   <ul style="margin-top:0.6em;">
-    <li>Read down it: the lookup takes a failed episode to 6.1 in one shot, steering is
-        worth a little more, and the model-based tweak does the rest.</li>
-    <li><strong>Fitting the survey error is worth a third of the score</strong>, and takes
-        the 10% hit rate from 25% to 41%. A misaligned quadrupole kicks and a misaligned
-        sextupole focuses; no launch offset imitates either.</li>
-    <li>It is still off by default. On this evidence it should not be.</li>
+    <li><strong>6.79 to 1.00 is one shot of placement. 1.00 to 0.77 is the focus.</strong>
+        Both matter, and they could hardly be more different: a two-row linear solve, and
+        4.5 shots of search against a fitted twin.</li>
+    <li><strong>6.5 shots</strong>, of which 2 are fixed overhead &mdash; load the optics,
+        place the spot. The focus often takes none at all, because the lookup has already
+        landed the size inside the shot-to-shot jitter.</li>
+    <li><strong>Zero screen switches, by design.</strong> All 31 BPMs sit upstream of the
+        readout screen and none of them intercept the beam, so the screen never has to
+        move. At 30 s a swap, that is real time not spent.</li>
+    <li>Eighteen minutes of model time an episode &mdash; and not one second of it is
+        beam time.</li>
   </ul>
 </section>
 
@@ -639,15 +700,21 @@
         beam it assumes, and reload. Another 40 s of model time, no extra shots. The size
         residual is the binding constraint, and this is the most promising thing we have
         not tried.</li>
-    <li><strong>The Dyna layer, started this afternoon.</strong> The twin is a free
-        simulator, so it can also be the machine: randomise the latent, run the real agent
-        against it, and clone what the planner decided. A millisecond proposal as a warm
-        start, instead of twenty shots of search.</li>
-    <li><strong>Fit the survey error by default</strong>, not as a flag. It is worth a
-        third of the score and we have the evidence now.</li>
-    <li><strong>Put the two tuners in the same room.</strong> MF-BO gets there in ten
-        shots, the RL agent gets further on the hard days. Nobody has run them against
-        each other on the same seeds.</li>
+    <li><strong>The Dyna layer: built, verified, and probably not worth it any more.</strong>
+        The twin can also play the machine, so the agent runs against it unmodified and the
+        planner&rsquo;s decisions get cloned into a policy &mdash; a twin episode converges
+        9.75 to 0.67 and the cloning fits. But the focus is now 4.5 shots and often zero, so
+        a warm start would buy wall-clock, not shots. Honest answer: the thing it was built
+        to fix went away while it was being built.</li>
+    <li><strong>Re-measure the survey-error fit.</strong> It was worth a third of the
+        score on the old coupled pipeline. Nobody has checked what it is worth now that
+        size and position are separate stages, and it is still off by default.</li>
+    <li><strong>Put the three tuners in the same room.</strong> MF-BO gets there in eight
+        shots, the RL agent in six and a half, the SVD workflow threads a beam the others
+        would never find. They now at least run on the same machine &mdash; but not on the
+        same seeds, and until they do we cannot say which one we would take to a shift.</li>
+    <li><strong>Beat the jitter floor.</strong> A single reading is worth 0.2 to 0.3 of
+        score on its own. Averaging shots costs budget; a noise model in the GP might not.</li>
     <li><strong>Mind the currents.</strong> Every knob here is in model units. The lattice
         and the current conversion disagree about the beam energy at the VBC by 8%, so
         S05&ndash;S06 would come out that much strong the day these settings become amps.</li>
@@ -661,8 +728,8 @@
         difference between the model and the machine.</li>
     <li>Anchor on the measurement, size your steps by their effect, and read the beam the
         way the control room reads it.</li>
-    <li>Ten shots from a cold start to 77% of days inside a tenth of the requested spot.
-        Twenty-five, and the hard days come too.</li>
+    <li>Under eight shots from a cold start, on a machine nobody had seen that morning
+        &mdash; and two of those shots are just loading the optics and placing the spot.</li>
   </ul>
   <p class="team" style="margin-top:1.4em;"><strong>Team Overfit &amp; Proud</strong></p>
   <p class="names">Amy &nbsp;&middot;&nbsp; Eiad &nbsp;&middot;&nbsp; Francesco

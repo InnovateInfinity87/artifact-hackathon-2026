@@ -279,12 +279,19 @@ class MBRLAgent:
         anchor_moments = best_moments
         trust = self.config.trust_region
         explore = True
+        stalled = 0
 
         for step in range(self.config.focus_shots):
             if (
                 _mismatch(history[-1], target, position_weight=0.0)
                 <= self.config.focus_mismatch_tolerance
             ):
+                break
+            # The jitter floor moves with the request, so when to stop is better
+            # decided by watching than by a fixed threshold: once several shots in
+            # a row have failed to beat the best, the stage is chasing noise and
+            # the remaining budget is wasted on it.
+            if stalled >= self.config.focus_patience:
                 break
             self._identify(history, first=step == 0)
             observed = self._observe(
@@ -446,6 +453,8 @@ class MBRLAgent:
                 lambda r: torch.stack([r.mu_x, r.mu_y], dim=-1),
             )
             correction = -_pseudo_inverse(jacobian, self.config.placement_cutoff) @ error
+            if not np.any(correction):
+                break  # the twin sees no response to move with; do not spend a shot
             low, high = knobs.trust_region(values, PLACEMENT_REACH)
             values = np.clip(values + correction, low, high)
             self._apply(env, knobs, values, history)

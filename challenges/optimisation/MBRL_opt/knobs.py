@@ -165,7 +165,11 @@ class KnobSet:
         return np.array([float(settings[name]) for name in self.names])
 
     def clip(self, values: np.ndarray) -> np.ndarray:
-        return np.clip(np.asarray(values, dtype=float).reshape(-1), self.low, self.high)
+        """Into the operating range, and finite. Nothing that is not a number may
+        reach a magnet: Cheetah stops tracking entirely rather than passing one on."""
+        values = np.asarray(values, dtype=float).reshape(-1)
+        values = np.where(np.isfinite(values), values, self.middle)
+        return np.clip(values, self.low, self.high)
 
     # ---------- network and solver units ----------
 
@@ -192,7 +196,14 @@ class KnobSet:
         Knobs the reading does not respond to keep a large step, bounded by `limit`;
         they will not be chosen anyway, and dividing by nearly zero is not useful.
         """
-        sensitivity = np.abs(np.asarray(sensitivity, dtype=float)).reshape(-1)
+        # A probe that lost the beam reports no response, or not a number; either
+        # way it is a knob the reading does not respond to. Left as NaN it would
+        # poison the scale, then every step taken with it, and eventually arrive at
+        # Cheetah as a magnet strength that is not a number.
+        sensitivity = np.nan_to_num(
+            np.abs(np.asarray(sensitivity, dtype=float)).reshape(-1),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
         floor = effect / (limit * np.maximum(self.scales, 1e-30))
         self.scales = effect / np.maximum(sensitivity, floor)
 
