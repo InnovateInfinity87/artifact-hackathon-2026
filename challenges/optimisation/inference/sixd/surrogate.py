@@ -88,19 +88,20 @@ class Maps:
         self.exps = exps
         self.loss_radius = loss_radius  # per key: start radius (in SCALE units) beyond which losses occur
 
-    def coords(self, z):
+    def coords(self, z, keys=None):
         """{key: (xy, alive)} for start coordinates z (N x 6)."""
-        xy = monomials(z, self.exps) @ self.coef
+        keys = self.keys if keys is None else keys
+        cols = [self.keys.index(k) for k in keys]
+        sel = np.ravel([[2 * i, 2 * i + 1] for i in cols])
+        xy = monomials(z, self.exps) @ self.coef[:, sel]
         r = np.sqrt(((z / SCALE) ** 2).sum(1))
-        return {k: (xy[:, 2 * i: 2 * i + 2], r < self.loss_radius[i]) for i, k in enumerate(self.keys)}
+        return {k: (xy[:, 2 * j: 2 * j + 2], r < self.loss_radius[i]) for j, (i, k) in enumerate(zip(cols, keys))}
 
     def indices(self, z, rng, keys=None):
         """Pixel index per key (as ment6d.track_all)."""
         keys = self.keys if keys is None else keys
         out = {}
-        for k, (xy, alive) in self.coords(z).items():
-            if k not in keys:
-                continue
+        for k, (xy, alive) in self.coords(z, keys).items():
             c = np.zeros((len(z), 4))
             c[:, 0], c[:, 2] = xy[:, 0], xy[:, 1]
             out[k] = ment6d.pixel_indices(c, alive, rng)
@@ -173,6 +174,19 @@ class CombinedMaps:
         self.keys = narrow.keys
         self.narrow_scale, self.radius = narrow_scale, radius
 
+    def coords(self, z, keys=None):
+        keys = self.keys if keys is None else keys
+        inner = np.sqrt(((z / (SCALE * self.narrow_scale)) ** 2).sum(1)) < self.radius
+        a = self.narrow.coords(z[inner], keys)
+        b = self.broad.coords(z[~inner], keys)
+        out = {}
+        for k in keys:
+            xy, alive = np.empty((len(z), 2)), np.empty(len(z), bool)
+            xy[inner], alive[inner] = a[k]
+            xy[~inner], alive[~inner] = b[k]
+            out[k] = (xy, alive)
+        return out
+
     def indices(self, z, rng, keys=None):
         keys = self.keys if keys is None else keys
         inner = np.sqrt(((z / (SCALE * self.narrow_scale)) ** 2).sum(1)) < self.radius
@@ -191,5 +205,27 @@ class CombinedMaps:
 NARROW = dict(order=5, scale=0.5, path=common.HERE / "surrogate_maps_narrow.npz")
 
 
-def load_combined():
-    return CombinedMaps(Maps.load(NARROW["path"]), Maps.load(OUT), NARROW["scale"])
+def load_combined(tag=""):
+    narrow = NARROW["path"].with_name(NARROW["path"].stem + tag + ".npz")
+    return CombinedMaps(Maps.load(narrow), Maps.load(OUT.with_name(OUT.stem + tag + ".npz")), NARROW["scale"])
+
+
+def steering_estimate(path=common.HERE.parent / "steering" / "result_bpm_nominal_seed0.json"):
+    """Quad offsets estimated by the BPM steering inference (steering_inference.py)."""
+    r = common.read_json(path)
+    return {q: tuple(np.array(v["estimate_um"]) * 1e-6) for q, v in r["quad_offsets"]["per_quad"].items()}
+
+
+def fit_with_offsets(line, configs, quad_offsets, tag, log=print):
+    """Broad and narrow maps of the model with the given quadrupole offsets."""
+    for q, (dx, dy) in quad_offsets.items():
+        line.line[q].shift_x, line.line[q].shift_y = dx, dy
+    try:
+        broad, _, _ = fit(line, configs, log=log)
+        broad.save(OUT.with_name(OUT.stem + tag + ".npz"))
+        narrow, _, _ = fit(line, configs, order=NARROW["order"], scale=NARROW["scale"], log=log)
+        narrow.save(NARROW["path"].with_name(NARROW["path"].stem + tag + ".npz"))
+    finally:
+        for q in quad_offsets:
+            line.line[q].shift_x, line.line[q].shift_y = 0.0, 0.0
+    return load_combined(tag)
