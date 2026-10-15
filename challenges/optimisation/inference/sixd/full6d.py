@@ -38,25 +38,35 @@ S02_Q_CURRENTS_A = {  # tomography/README.md section 6, S02 quad_01 / quad_02
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02", "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 
 
-def vbc_off_lattice(path=common.HERE / "CLARA_cheetah_vbc_off.json"):
-    """The lattice file with the VBC chicane at angle 0 (dipole faces square), written
-    next to this module: the measurement plan runs with the VBC off."""
+L4H_CAVITY = "cla_l4h_lin_cav_01"
+PLAN_LATTICE = common.HERE / "CLARA_cheetah_plan.json"
+
+
+def plan_lattice(vbc_off: bool = True, l4h_off: bool = True, path=PLAN_LATTICE):
+    """The lattice file the measurement runs on, written next to this module: the VBC
+    chicane at angle 0 (faces square) and the L4H X-band cavity unpowered (it converts to
+    a drift; its iris aperture stays). Francesco, 15 Oct: the plan runs with the VBC off,
+    and L4H is off on the machine."""
     import json
 
     lattice = json.loads(xsuite_model.LATTICE_JSON.read_text())
-    elements = lattice["elements"] if "elements" in lattice else lattice
-    for name in VBC_DIPOLES:
-        for key in ("angle", "dipole_e1", "dipole_e2"):
-            elements[name][1][key] = 0.0
+    elements = lattice["elements"]
+    if vbc_off:
+        for name in VBC_DIPOLES:
+            for key in ("angle", "dipole_e1", "dipole_e2"):
+                elements[name][1][key] = 0.0
+    if l4h_off:
+        elements[L4H_CAVITY][1]["voltage"] = 0.0
     path.write_text(json.dumps(lattice))
     return path
 
 
-def build_line(end: str = LINE_END, apertures: bool = False, vbc_off: bool = True) -> cv.XsuiteLine:
-    """The model line, by default with the VBC off; `apertures` adds the vacuum chamber,
-    which loses particles."""
+def build_line(end: str = LINE_END, apertures: bool = False, vbc_off: bool = True,
+               l4h_off: bool = True) -> cv.XsuiteLine:
+    """The model line, by default on the plan's lattice (VBC off, L4H off); `apertures`
+    adds the vacuum chamber, which loses particles."""
     _, energy_ev, _ = xsuite_model.load_distribution()
-    lattice = vbc_off_lattice() if vbc_off else xsuite_model.LATTICE_JSON
+    lattice = plan_lattice(vbc_off, l4h_off) if (vbc_off or l4h_off) else xsuite_model.LATTICE_JSON
     converted = xsuite_model.build_line(energy_ev, lattice, end=end, apertures=apertures)
     tdc.install_tdc(converted, voltage_v=0.0)
     line = cv.XsuiteLine(converted)
