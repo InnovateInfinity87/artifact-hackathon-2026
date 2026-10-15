@@ -56,7 +56,7 @@ def use_maps(maps, register_data=None, damping=0.7):
             last[k] = (shifted, alive)
             c = np.zeros((len(sample), 4))
             c[:, 0], c[:, 2] = shifted[:, 0], shifted[:, 1]
-            out[k] = ment6d.pixel_indices(c, alive, rng)
+            out[k] = ment6d.pixel_indices(c, alive, rng, k[1])
         return out
 
     def ment(indices, data, keys_used, *args, **kwargs):
@@ -102,7 +102,8 @@ def lean_sets(keys):
     t1 = few(("cla_s02_dia_scr_03", "cla_s04_dia_scr_03"), ("nominal_off", "s02a", "s02b", "s02c")) + streak9
     t2 = few(("cla_s02_dia_scr_03", "cla_s03_dia_scr_01", "cla_s04_dia_scr_03"),
              ("nominal_off", "s02a", "s02b", "s02c")) + streak9
-    return {"two screens four settings": t1, "three screens four settings": t2, "full": full, "upstream nominal only": s2, "two S02 settings": s3,
+    no_tdc = [k for k in t2 if not k[0].endswith(("_plus", "_minus"))]
+    return {"no TDC": no_tdc, "two screens four settings": t1, "three screens four settings": t2, "full": full, "upstream nominal only": s2, "two S02 settings": s3,
             "two streak screens": s4, "five transverse screens": s5, "one streak screen": s6,
             "one S02 setting": s7}
 
@@ -113,7 +114,7 @@ def run(line, images_path=common.HERE / "images.npz", set_name="full", suffix="_
     register_data = None
     if register:
         keys, images, n_meas, _ = ment6d.load_images(images_path)
-        register_data = {k: ment6d.measured_fractions(img, n_meas) for k, img in zip(keys, images)}
+        register_data = {k: ment6d.measured_fractions(img, n_meas, k[1]) for k, img in zip(keys, images)}
     offsets = use_maps(maps or surrogate.load_combined(), register_data)
     run_ment.OUT_JSON = common.HERE / f"ment_results{suffix}.json"
     run_ment.OUT_NPZ = common.HERE / f"ment_full{suffix}.npz"

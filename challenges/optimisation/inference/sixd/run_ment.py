@@ -44,7 +44,7 @@ def run(line, images_path, set_name="full", log=print):
     configs = full6d.make_plan(line)
     keys, images, n_meas, beam = ment6d.load_images(images_path)
     used = image_sets(keys)[set_name]
-    data = {k: ment6d.measured_fractions(img, n_meas) for k, img in zip(keys, images)}
+    data = {k: ment6d.measured_fractions(img, n_meas, k[1]) for k, img in zip(keys, images)}
     truth = ment6d.summary(beam)
     out = ment6d.reconstruct(
         line, configs, keys, images, n_meas, keys_used=used, n_sample=150_000, log=log,

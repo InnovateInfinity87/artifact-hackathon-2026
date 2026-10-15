@@ -59,12 +59,47 @@ class Config:
     k1: dict[str, float] = field(default_factory=dict)
     tdc_voltage_v: float = 0.0
     screens: list[str] = field(default_factory=list)
+    rf_phase_deg: dict[str, float] = field(default_factory=dict)  # cavity -> phase change
 
 
 def apply_config(line: cv.XsuiteLine, config: Config) -> None:
     line.restore_nominal_quads()
     line.set_quad_k1(config.k1)
     set_tdc_voltage(line, config.tdc_voltage_v)
+    set_rf_phases(line.line, config.rf_phase_deg)
+
+
+_RF_NOMINAL: dict[int, dict] = {}
+
+
+def set_rf_phases(xline, changes: dict[str, float]) -> None:
+    """Shift the phase of whole linac cavities (cheetah convention, degrees) and scale the
+    reference energy gain of each cavity with cos(phi), i.e. every downstream magnet is
+    rescaled to the new beam energy, as operators do for a phase scan. The edge and
+    ponderomotive lenses are left at their nominal strength (small). Cavities not named
+    go back to nominal. Works on any xsuite line built by xsuite_model (SimEnv's too)."""
+    key = id(xline)
+    if key not in _RF_NOMINAL:
+        nominal = {}
+        for name in xline.element_names:
+            if "..cav" in name or "..ref" in name:
+                cavity = name.split("..")[0]
+                el = xline.element_dict[name]
+                entry = nominal.setdefault(cavity, {"cav": {}, "ref": {}})
+                if "..cav" in name:
+                    entry["cav"][name] = float(el.phase)
+                else:
+                    entry["ref"][name] = float(el.Delta_p0c)
+        _RF_NOMINAL[key] = nominal
+    for cavity, entry in _RF_NOMINAL[key].items():
+        dphi = np.radians(changes.get(cavity, 0.0))
+        any_phase = next(iter(entry["cav"].values()))
+        phi0 = np.pi / 2 - any_phase  # cheetah phase
+        ratio = np.cos(phi0 + dphi) / np.cos(phi0)
+        for name, phase in entry["cav"].items():
+            xline.element_dict[name].phase = phase - dphi
+        for name, dp in entry["ref"].items():
+            xline.element_dict[name].Delta_p0c = dp * ratio
 
 
 def screens_after(line: cv.XsuiteLine, element: str) -> list[str]:

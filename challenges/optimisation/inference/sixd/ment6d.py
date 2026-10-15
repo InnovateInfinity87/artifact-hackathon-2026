@@ -46,13 +46,32 @@ def load_images(path=IMAGES):
     data = np.load(path)
     keys = [tuple(str(k).split("|")) for k in data["keys"]]
     images = data["images"].astype(float)
-    n_particles = len(data["beam"])
+    n_particles = int(data["n_particles"]) if "n_particles" in data else len(data["beam"])
+    GEOMETRY.clear()
+    if "geometry_screens" in data:  # SimEnv images: each screen's own chip
+        for screen, g in zip(data["geometry_screens"], data["geometry"]):
+            GEOMETRY[str(screen)] = (*map(float, g[:4]), int(g[4]), int(g[5]), float(g[6]))
     return keys, images, n_particles, data["beam"]
 
 
-def measured_fractions(image: np.ndarray, n_particles: int) -> np.ndarray:
+# Per-screen image geometry, for images that are not the +-5 mm, 200 x 200 virtual-machine
+# ones (SimEnv uses each screen's real chip): screen -> (xmin, xmax, ymin, ymax, nx, ny,
+# blur_m) of the reconstruction grid. Screens not listed use the default grid.
+GEOMETRY: dict[str, tuple] = {}
+
+
+def geometry(screen=None):
+    if screen in GEOMETRY:
+        return GEOMETRY[screen]
+    f = full6d.FIELD_OF_VIEW_M
+    return (-f, f, -f, f, PIXELS, PIXELS, full6d.SCREEN_RESOLUTION_M)
+
+
+def measured_fractions(image: np.ndarray, n_particles: int, screen=None) -> np.ndarray:
     """Rebinned pixel fractions plus the out-of-window fraction (sums to 1)."""
-    coarse = image.reshape(PIXELS, REBIN, PIXELS, REBIN).sum((1, 3)).ravel()
+    _, _, _, _, nx, ny, _ = geometry(screen)
+    ry, rx = image.shape[0] // ny, image.shape[1] // nx
+    coarse = image.reshape(ny, ry, nx, rx).sum((1, 3)).ravel()
     return np.append(coarse, max(n_particles - coarse.sum(), 0.0)) / n_particles
 
 
@@ -72,13 +91,15 @@ def image_moments(image: np.ndarray, n_particles: float | None = None) -> tuple[
 
 
 # ---------------------------------------------------------------------------- tracking
-def pixel_indices(coords: np.ndarray, alive: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    blur = rng.normal(0, full6d.SCREEN_RESOLUTION_M, (len(coords), 2))
-    ix = np.floor((coords[:, 0] + blur[:, 0] + full6d.FIELD_OF_VIEW_M) / PIXEL_M)
-    iy = np.floor((coords[:, 2] + blur[:, 1] + full6d.FIELD_OF_VIEW_M) / PIXEL_M)
-    inside = alive & (ix >= 0) & (ix < PIXELS) & (iy >= 0) & (iy < PIXELS)
-    index = np.full(len(coords), OUTSIDE, dtype=np.int32)
-    index[inside] = (iy[inside] * PIXELS + ix[inside]).astype(np.int32)
+def pixel_indices(coords: np.ndarray, alive: np.ndarray, rng: np.random.Generator,
+                  screen=None) -> np.ndarray:
+    x0, x1, y0, y1, nx, ny, res = geometry(screen)
+    blur = rng.normal(0, res, (len(coords), 2)) if res else np.zeros((len(coords), 2))
+    ix = np.floor((coords[:, 0] + blur[:, 0] - x0) / ((x1 - x0) / nx))
+    iy = np.floor((coords[:, 2] + blur[:, 1] - y0) / ((y1 - y0) / ny))
+    inside = alive & (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    index = np.full(len(coords), nx * ny, dtype=np.int32)
+    index[inside] = (iy[inside] * nx + ix[inside]).astype(np.int32)
     return index
 
 
@@ -100,7 +121,7 @@ def track_config(args):
         alive = np.zeros(len(_SAMPLE), bool)
         coords[ids] = _raw_coordinates(particles)
         alive[ids] = particles.state > 0
-        out[screen] = pixel_indices(coords, alive, rng)
+        out[screen] = pixel_indices(coords, alive, rng, screen)
     line.restore_nominal_quads()
     full6d.set_tdc_voltage(line, 0.0)
     return config.name, out
@@ -297,7 +318,7 @@ def ment(indices: dict, data: dict, keys_used, sweeps=30, omega=0.6, eps=None, n
             idx, meas = indices[key], data[key]
             w = np.exp(logw - logw.max())
             w /= w.sum()
-            sim = np.bincount(idx, weights=w, minlength=OUTSIDE + 1)
+            sim = np.bincount(idx, weights=w, minlength=len(meas))
             populated = sim > 0
             update = np.zeros_like(sim)
             update[populated] = omega * np.log((meas[populated] + eps) / (sim[populated] + eps))
@@ -316,7 +337,8 @@ def ment(indices: dict, data: dict, keys_used, sweeps=30, omega=0.6, eps=None, n
 
 
 def predicted(indices, w, key):
-    return np.bincount(indices[key], weights=w, minlength=OUTSIDE + 1)
+    _, _, _, _, nx, ny, _ = geometry(key[1])
+    return np.bincount(indices[key], weights=w, minlength=nx * ny + 1)
 
 
 # ---------------------------------------------------------------------------- summaries
@@ -404,7 +426,7 @@ def reconstruct(line, configs, keys, images, n_meas, keys_used=None, n_sample=20
     """Adaptive MENT: stage 0 uses the broad prior; every later stage redraws the sample
     from a Gaussian fitted to the previous weighted sample, inflated by `inflation`."""
     keys_used = keys if keys_used is None else keys_used
-    data = {k: measured_fractions(img, n_meas) for k, img in zip(keys, images)}
+    data = {k: measured_fractions(img, n_meas, k[1]) for k, img in zip(keys, images)}
     names_used = {k[0] for k in keys_used}
     cfgs = [c for c in configs if c.name in names_used]
     sigma = np.diag(BROAD_PRIOR_RMS**2)

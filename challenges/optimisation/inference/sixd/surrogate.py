@@ -104,7 +104,7 @@ class Maps:
         for k, (xy, alive) in self.coords(z, keys).items():
             c = np.zeros((len(z), 4))
             c[:, 0], c[:, 2] = xy[:, 0], xy[:, 1]
-            out[k] = ment6d.pixel_indices(c, alive, rng)
+            out[k] = ment6d.pixel_indices(c, alive, rng, k[1])
         return out
 
     def save(self, path=OUT):
