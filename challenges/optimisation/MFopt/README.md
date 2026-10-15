@@ -91,3 +91,13 @@ days on which the beam is lost part way along the line; stage A then threads it
 | | stage A + MF-BO | 0.37 | 0.30 | 75 % | 92 % | 13.2 |
 
 Every episode ends within 50 steps (longest 32) with the beam on the screen.
+
+## Log: energy discrepancy at the VBC
+
+The lattice file's cavities bring the reference beam to 181.6 MeV at the VBC, while
+`data/clara/lattice_data/utils.py` converts S05, VBC and S06 magnet currents at
+`beam_energy` 196.6 MeV, about 8 % higher (see `nominal_model/README.md`). It does not
+matter for MFopt: every knob here is set in model units (k1, k2, kick angle) and the
+responses come from the same model, so no current is converted anywhere. It would
+matter only when the settings are turned into currents for the real machine, where
+the S05 to S06 magnets would come out about 8 % strong. Logged, not corrected.
