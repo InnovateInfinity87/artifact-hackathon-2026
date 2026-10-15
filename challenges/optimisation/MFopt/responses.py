@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
+from .batched import probe_batch
 from .optics_env import CORRECTOR_STEP, QUAD_STEP, OpticsEnv
 
 QUADRUPOLES = ("cla_fea_mag_quad_14", "cla_fea_mag_quad_15", "cla_fea_mag_quad_16",
@@ -88,19 +89,22 @@ def node(ij: tuple[int, int]) -> dict:
     k1 = optics.k1
     settings = {**{n: env.twin._knobs[n].value for n in env.corrector_names}, **k1}
     base = env._probe(settings)
-    R = np.zeros((2 * len(env.bpm_names) + 2, len(env.corrector_names)))
-    for c, name in enumerate(env.corrector_names):
-        centre = settings[name]
-        plus = _centroids(env, env._probe({**settings, name: centre + CORRECTOR_STEP}))
-        minus = _centroids(env, env._probe({**settings, name: centre - CORRECTOR_STEP}))
-        R[:, c] = (plus - minus) / (2 * CORRECTOR_STEP)
-    J = np.zeros((len(READOUT), len(DOF)))
-    for c, name in enumerate(DOF):
-        centre = settings.get(name, env.twin._knobs[name].value)
-        h = _step(name)
-        plus = _readout(env, env._probe({**settings, name: centre + h}))
-        minus = _readout(env, env._probe({**settings, name: centre - h}))
-        J[:, c] = (plus - minus) / (2 * h)
+    # every finite difference in one vectorised track: +h then -h per knob
+    knobs = list(env.corrector_names) + list(DOF)
+    steps = [CORRECTOR_STEP] * len(env.corrector_names) + [_step(n) for n in DOF]
+    centre = {n: settings.get(n, env.twin._knobs[n].value) for n in knobs}
+    columns = {n: np.full(2 * len(knobs), centre[n]) for n in set(knobs)}
+    for row, (name, h) in enumerate(zip(knobs, steps)):
+        columns[name][2 * row] += h
+        columns[name][2 * row + 1] -= h
+    stats, transmission, names = probe_batch(env, columns, settings)
+    shots = [{"names": names, "stats": s, "transmission": t}
+             for s, t in zip(stats, transmission)]
+    nc = len(env.corrector_names)
+    R = np.array([(_centroids(env, shots[2 * c]) - _centroids(env, shots[2 * c + 1]))
+                  / (2 * CORRECTOR_STEP) for c in range(nc)]).T
+    J = np.array([(_readout(env, shots[2 * (nc + c)]) - _readout(env, shots[2 * (nc + c) + 1]))
+                  / (2 * h) for c, h in enumerate(steps[nc:])]).T
     return {
         "ij": (i, j),
         "k1": np.array([k1[q] for q in env.nodes.quadrupoles]),

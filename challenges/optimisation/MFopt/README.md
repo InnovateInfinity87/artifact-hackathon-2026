@@ -101,3 +101,13 @@ matter for MFopt: every knob here is set in model units (k1, k2, kick angle) and
 responses come from the same model, so no current is converted anywhere. It would
 matter only when the settings are turned into currents for the real machine, where
 the S05 to S06 magnets would come out about 8 % strong. Logged, not corrected.
+
+## Batched Cheetah tracks: `batched.py`
+
+`probe_batch(env, {knob: values}, base)` tracks N settings of the error-free twin in
+one vectorised Cheetah pass and returns the same readings as N calls to `_probe`
+(they agree to about 1e-7 relative). It runs on a private deep copy of the twin's
+segment, so the twin that `_probe` and the re-match use is never left batched. The
+MF-BO low fidelity (256 points) and every finite difference in `responses.py` go
+through it: a table node takes 3 s instead of 15 s, the low-fidelity sample 1.5 s
+instead of 10 s.

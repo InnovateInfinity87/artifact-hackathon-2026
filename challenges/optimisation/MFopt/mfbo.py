@@ -37,6 +37,7 @@ from botorch.models.transforms import Standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from scipy.stats import qmc
 
+from .batched import probe_batch
 from .harness import Session
 from .responses import QUADRUPOLES, SEXTUPOLES
 from .steering import FINAL_CORRECTORS, _clip, _corrector_zero
@@ -103,7 +104,7 @@ class SpotBO:
         # the low fidelity: Sobol points over the box, through the model
         x = qmc.Sobol(len(KNOBS), seed=seed).random(n_model) * 2 - 1
         x[0] = 0
-        y = np.array([self._model_readout(xi) for xi in x])
+        y = self._model_readouts(x)
         ok = np.all(np.isfinite(y), axis=1)
         self.low = [_fit(x[ok], y[ok, i]) for i in range(5)]
         self.x_high: list[np.ndarray] = []
@@ -135,10 +136,14 @@ class SpotBO:
     def _settings(self, x: np.ndarray) -> dict[str, float]:
         return dict(zip(KNOBS, (self.centre + self.half * np.asarray(x)).tolist()))
 
-    def _model_readout(self, x: np.ndarray) -> np.ndarray:
-        r = self.env._probe({**self.base, **self._settings(x)})
-        row = r["stats"][r["names"].index(self.env.config.target_screen)]
-        return np.append(row, r["transmission"])
+    def _model_readouts(self, x: np.ndarray) -> np.ndarray:
+        """The twin's readout (mu_x, mu_y, sigma_x, sigma_y, T) at every row of x,
+        in one vectorised Cheetah track."""
+        values = self.centre + self.half * np.atleast_2d(x)
+        stats, transmission, names = probe_batch(
+            self.env, dict(zip(KNOBS, values.T)), self.base)
+        readout = stats[:, names.index(self.env.config.target_screen)]
+        return np.column_stack([readout, transmission])
 
     def _posterior(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Mean and sd of the machine's five readouts at the points x."""
