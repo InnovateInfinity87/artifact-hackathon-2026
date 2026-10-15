@@ -6,10 +6,12 @@ machine:
 
 1. **Which optics?** The quadrupole k1s that give that spot. They start from the
    144 nodes rematched with the VBC on (`optics_matching_vbc_on/`, 131.7 mrad),
-   interpolated in log size. Those were fitted in second-order Cheetah; in this
-   environment's first-order model their spot is off by up to about 30 %, so the
-   four final-focus strengths are re-matched here, in an error-free copy of the
-   environment, within the environment's magnet limits.
+   interpolated in log size. Those were fitted in second-order Cheetah with L4H
+   powered and without magnet limits; the environment tracks at second order with
+   L4H a drift, and clips every magnet to what 100 A reaches. So the four
+   final-focus strengths are re-matched here, in an error-free copy of the
+   environment, within those limits. Below about 0.13 mm in x the nodes need FEH
+   Q2 beyond its limit, and the re-match stops at the limit.
 2. **Which quadrupoles matter?** The SVD of the weighted response of ln(beam size)
    at every screen and the readout to every quadrupole, at that optics. Rows and
    weights follow `SizeModes` (the readout carries half of the squared weight), but
@@ -43,7 +45,21 @@ for path in (CHALLENGE_DIR, CHALLENGE_DIR / "RL_framework"):
 
 from optics_matching import SizeModes  # noqa: E402
 from rl_framework.config import RLConfig  # noqa: E402
-from rl_framework.envs.sim_env import BPM_TAG, SCREEN_TAG, SimEnv  # noqa: E402
+from rl_framework.envs.sim_env import (  # noqa: E402
+    BPM_TAG,
+    DTYPE,
+    SCREEN_TAG,
+    VBC_EDGE,
+    SimEnv,
+)
+
+# `batched.py` takes the SimEnv names through this module, which puts RL_framework
+# on the path first.
+__all__ = ["BPM_TAG", "DTYPE", "SCREEN_TAG", "VBC_EDGE", "OpticsEnv", "TargetOptics"]
+
+# `batched.py` takes the SimEnv names through this module, which puts RL_framework
+# on the path first.
+__all__ = ["BPM_TAG", "DTYPE", "SCREEN_TAG", "VBC_EDGE", "OpticsEnv", "TargetOptics"]
 
 # The 144 nodes rematched with the VBC on at 131.7 mrad (second-order Cheetah,
 # apertures): Eiad's 42-quad prefix kept, the 30 quads after the VBC refitted.
@@ -87,6 +103,8 @@ READOUT_WEIGHT = 0.5
 # Finite-difference steps: k1 in m^-2, corrector kicks in rad.
 QUAD_STEP = 0.05
 CORRECTOR_STEP = 2e-5
+# Tracks the final-focus re-match may spend.
+MATCH_EVALUATIONS = 60
 # Particles the error-free twin tracks: half of the environment's 10,000, which
 # keeps rms sizes to about 1 % and halves the cost of every response.
 TWIN_PARTICLES = 5_000
@@ -220,7 +238,7 @@ class OpticsEnv(SimEnv):
         names = list(FINAL_FOCUS)
         low = np.array([self.twin._knobs[n].low for n in names])
         high = np.array([self.twin._knobs[n].high for n in names])
-        x0 = np.clip([start[n] for n in names], low, high)
+        x0 = np.clip([start.get(n, self.twin._knobs[n].value) for n in names], low, high)
 
         def residual(k):
             readings = self._probe({**start, **dict(zip(names, k))})
@@ -233,7 +251,7 @@ class OpticsEnv(SimEnv):
 
         fit = least_squares(residual, x0, bounds=(low, high), diff_step=1e-3,
                             x_scale=np.maximum(np.abs(x0), 1.0), xtol=1e-6,
-                            ftol=1e-6, max_nfev=60)
+                            ftol=1e-6, max_nfev=MATCH_EVALUATIONS)
         k = {**start, **dict(zip(names, fit.x))}
         clipped = [n for n, v, lo, hi in zip(names, fit.x, low, high)
                    if min(v - lo, hi - v) < 1e-6 * (hi - lo)]
