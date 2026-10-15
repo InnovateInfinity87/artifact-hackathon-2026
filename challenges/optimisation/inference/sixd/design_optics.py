@@ -104,7 +104,10 @@ def score(line, sigma0, screen, kind, k1, sample=None):
             disp_part = abs(m0[0, 5]) * np.sqrt(sigma0[4, 5] ** 2 / sigma0[4, 4])
             beta_x = np.sqrt(max(bx**2 - disp_part**2, (0.05 * bx) ** 2))
         dispersion = abs(m0[0, 5])
-        cost = beta_x / max(dispersion, 1e-9) + 0.3 * sy0 / streak
+        # the chirp is read from the tilt of the (tau, delta) image, so time resolution
+        # comes first; the dispersion only has to stay visible (|R16| >= 0.01 m from S02)
+        cost = sy0 / streak + 0.05 * beta_x / max(dispersion, 1e-9)
+        penalty += max(0.01 / max(dispersion, 1e-9) - 1, 0) ** 2
         penalty += max(sxv / 4e-3 - 1, 0) ** 2 + max(syv / WINDOW_RMS_M - 1, 0) ** 2
     return cost + 100 * penalty, dict(
         sx0=float(sx0), sy0=float(sy0), sxv=float(sxv), syv=float(syv), streak=float(streak),
@@ -155,6 +158,73 @@ def design(line, sigma0, screen, sample, seed=0, maxiter=40, base_k1=None):
     full6d.set_tdc_voltage(line, 0.0)
     return {"kind": kind, "k1": k1, "currents_a": currents, "cost": float(best.fun),
             "cost_linear": float(coarse.fun), **info}
+
+
+ALL_AFTER_S05 = UPSTREAM + [f"cla_s07_mag_quad_{i:02d}" for i in range(3, 11)] + [
+    "cla_fea_mag_quad_01", "cla_fea_mag_quad_02"]
+
+
+def refine_all(line, sigma0, screen, sample, start_k1, quads=ALL_AFTER_S05, scale=0.05, step=0.03, seed=0,
+               maxfev=1500):
+    """Tracked local search over all quads after S05 from `start_k1`, starting from a random
+    perturbation of relative size `scale` of each quad range. The sequential design keeps the
+    magnets up to the TDC at the dcp setting, which fixes beta_y at the TDC and therefore the
+    best possible time resolution; this lets them move."""
+    from scipy.optimize import minimize
+
+    kind = TARGETS[screen][0] if screen in TARGETS else SEQUENTIAL[screen][0]
+    bounds = [line.quad_k1_limits(q) for q in quads]
+    lo, hi = np.array([min(b) for b in bounds]), np.array([max(b) for b in bounds])
+    x0 = np.array([start_k1.get(q, line.nominal_k1[q]) for q in quads])
+    u0 = np.clip((x0 - lo) / (hi - lo) + scale * np.random.default_rng(seed).normal(size=len(quads)) * (seed > 0), 0, 1)
+
+    def f(u):
+        x = lo + (hi - lo) * np.clip(u, 0, 1)
+        return score(line, sigma0, screen, kind, {**start_k1, **dict(zip(quads, x))}, sample)[0]
+
+    # Nelder-Mead from a small simplex: Powell's line searches span the whole range, where
+    # every point loses particles (flat 1e6 cost)
+    simplex = np.vstack([u0] + [u0 + step * np.eye(len(quads))[i] for i in range(len(quads))])
+    res = minimize(f, u0, method="Nelder-Mead",
+                   options={"maxfev": maxfev, "initial_simplex": simplex, "xatol": 1e-4, "fatol": 1e-4})
+    k1 = {**start_k1, **dict(zip(quads, lo + (hi - lo) * np.clip(res.x, 0, 1)))}
+    _, info = score(line, sigma0, screen, kind, k1, sample)
+    currents = {q: line.quad_current_from_k1(q, k) for q, k in k1.items()}
+    line.restore_nominal_quads()
+    full6d.set_tdc_voltage(line, 0.0)
+    return {"kind": kind, "k1": k1, "currents_a": currents, "cost": float(res.fun), "seed": seed, **info}
+
+
+def _refine_one(args):
+    screen, start_k1, seed = args
+    beam, _, _ = common.xsuite_model.load_distribution()
+    res = refine_all(_LINE, np.cov(beam.T), screen, beam[::200][:1000], start_k1, seed=seed)
+    res["tracked"] = check_tracked(_LINE, beam[:20000], screen, res["k1"])
+    return res
+
+
+def run_refine(line, screen, seeds=(0, 1, 2, 3), workers=4):
+    """Refine one existing design over all quads after S05 (forked restarts); keep the best."""
+    import multiprocessing as mp
+
+    global _LINE
+    _LINE = line
+    results = common.read_json(OUT)
+    start = results[screen]["k1"]
+    with mp.get_context("fork").Pool(workers) as pool:
+        runs = pool.map(_refine_one, [(screen, start, s) for s in seeds])
+    for r in runs:
+        if "sy0" not in r:
+            print(r["seed"], "failed", flush=True)
+            continue
+        print(r["seed"], round(r["cost"], 4), {k: round(r[k] * 1e3, 3) for k in ("sy0", "streak", "sxv", "syv")},
+              "r16", round(r["r16"], 4), "inside", r["tracked"].get("off", {}).get("inside"), flush=True)
+    best = min(runs, key=lambda r: r["cost"])
+    if best["cost"] < results[screen]["cost"]:
+        results[screen] = best
+        common.write_json(OUT, results, indent=1)
+    report({screen: results[screen]})
+    return runs
 
 
 def check_tracked(line, beam, screen, k1):
