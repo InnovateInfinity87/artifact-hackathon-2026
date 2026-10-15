@@ -5,6 +5,7 @@ Figures for the CLARA hackathon talk, one section per figure: path (relative to 
 ## Common settings (geometry and transmission-along-s figures)
 
 - Model: upstream `amylizzle/artifact-hackathon-2026` master at `edfcf46` (includes PR #3 per-element SimFrame apertures and PR #4 VBC on at 118.5 mrad with edge angles).
+- Since these figures were made, master runs the VBC at 131.7 mrad (R56 = −57.6 mm, the measured maximum compression into FEBE). With that default the nominal optics transmit 72% (Cheetah and xsuite), all lost upstream of the VBC; the numbers below are for 118.5 mrad.
 - Simulator: Cheetah 0.8.4 through `SimEnv`, apertures on, nominal 200k-particle measured beam (35.8 MeV), no misalignments, jitter or ripple.
 - Tracking order: second order for every element that supports it (Drift, Quadrupole, Dipole, CombinedCorrector, Sextupole), per Francesco. For reference, the nominal VBC-on transmission is 58.57% linear and 58.71% second order.
 - Line: `cla_s02_sim_aper_01` to `cla_feh_dia_scr_01`, 64.4 m, 655 elements, 282 apertures.
