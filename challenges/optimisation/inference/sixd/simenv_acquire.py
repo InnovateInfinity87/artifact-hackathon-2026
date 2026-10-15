@@ -3,10 +3,8 @@ images in the images.npz layout, with each screen's own chip geometry.
 
 The episode's machine is SimEnv's: its own beam (size, shape, offset), magnet set-point
 errors, 50 um quad/sextupole misalignments, 30 um diagnostic offsets and shot jitter.
-Only `env.step` is used to set magnets, pick the screen and read BPMs and images, with
-two exceptions, both said where they happen: the linac phase (SimEnv has no RF knob; the
-phase is written into its xsuite line the way full6d.set_rf_phases does for the model)
-and the true beam, read for scoring only.
+Only `env.step` is used to set magnets and cavity phases, pick the screen and read BPMs
+and images. The one exception is the true beam, read for scoring only.
 """
 
 from __future__ import annotations
@@ -23,6 +21,9 @@ sys.path.insert(0, str(common.HERE.parent / "steering"))
 SHAPE = (1024, 1024)  # camera grid; the reconstruction rebins it by REBIN
 REBIN = 4
 L02 = "cla_l02_lin_cav_01"
+# SimEnv phase knobs are Cheetah phases in degrees; a Config's rf_phase_deg offset p
+# (full6d.set_rf_phases, xsuite phase - p) is Cheetah phase + PHASE_SIGN * p
+PHASE_SIGN = 1.0
 
 
 def make_env(num_particles=20_000, seed=0, **kwargs):
@@ -74,8 +75,12 @@ def svd_steer(env, model, base, iterations=3, cutoff=1e-3, screen="cla_feh_dia_s
 
 
 def config_magnets(base, config):
+    """Magnet and phase settings for a Config. The phase only: SimEnv rescales nothing
+    downstream, which is Config.rf_rescale = False."""
     out = dict(base)
     out.update(config.k1)
+    for cavity, p in config.rf_phase_deg.items():
+        out[cavity] = base[cavity] + PHASE_SIGN * p
     return out
 
 
@@ -86,8 +91,6 @@ def acquire(env, configs, keys, base, shots=10, out=common.HERE / "images_simenv
     images, bpm, valid = [], [], []
     for cname, screen in keys:
         config = by_name[cname]
-        # SimEnv has no RF knob: the phase goes straight into its xsuite line
-        full6d.set_rf_phases(env.transport._line, config.rf_phase_deg)
         magnets = config_magnets(base, config)
         img, xs, ys, vs = 0, [], [], []
         for _ in range(shots):
@@ -97,7 +100,6 @@ def acquire(env, configs, keys, base, shots=10, out=common.HERE / "images_simenv
         images.append(img)
         bpm.append(np.stack([np.mean(xs, 0), np.mean(ys, 0)], 1))
         valid.append(np.min(vs, 0))
-    full6d.set_rf_phases(env.transport._line, {})
     screens = sorted({s for _, s in keys})
     geometry = [(*env.screen_extent(s), SHAPE[1] // REBIN, SHAPE[0] // REBIN, 0.0) for s in screens]
     beam = env._coordinates  # the episode's true beam: scoring only
