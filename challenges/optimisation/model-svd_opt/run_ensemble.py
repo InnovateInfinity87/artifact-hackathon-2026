@@ -59,7 +59,8 @@ def episode_result(index,seed,config,directory,summary,error,wall):
         evaluations={}
         for stage,filename in [('optics',f'{method}_optics.json'),('centering',f'{method}_centering.json')]:
             p=directory/filename
-            evaluations[stage]=len(json.loads(p.read_text())['records']) if p.exists() else None
+            payload=json.loads(p.read_text()) if p.exists() else None
+            evaluations[stage]=payload.get('shots',len(payload['records'])) if payload else None
         branches[method]=dict(status=status,final_score=score,
             score_standard_error=final.get('benchmark_score_standard_error') if final else None,
             last_shot_score=final.get('benchmark_score') if final else None,
@@ -134,16 +135,17 @@ def write_complete(path,metadata,episodes):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',required=True);p.add_argument('--episodes',type=int,default=100);p.add_argument('--workers',type=int,default=8);p.add_argument('--seed',type=int,default=42)
-    p.add_argument('--target-mm',nargs=2,type=float,default=[1.,1.]);p.add_argument('--particles',type=int,default=10000);p.add_argument('--repeats',type=int,default=3)
-    p.add_argument('--thread-budget',type=int,default=40);p.add_argument('--optics-budget',type=int,default=35);p.add_argument('--center-budget',type=int,default=25)
+    p.add_argument('--strategy',choices=['few_shot','fixed_budget'],default='few_shot')
+    p.add_argument('--target-mm',nargs=2,type=float,default=[1.,1.]);p.add_argument('--particles',type=int,default=10000);p.add_argument('--repeats',type=int,default=1)
+    p.add_argument('--thread-budget',type=int,default=8);p.add_argument('--optics-budget',type=int,default=12);p.add_argument('--center-budget',type=int,default=4)
     a=p.parse_args()
     if min(a.episodes,a.workers,a.particles,a.repeats)<1:p.error('Counts must be positive')
     out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=False)
-    base=dict(target=[v*.001 for v in a.target_mm],backend='cheetah',particles=a.particles,repeats=a.repeats,thread_budget=a.thread_budget,optics_budget=a.optics_budget,center_budget=a.center_budget)
+    base=dict(strategy=a.strategy,target=[v*.001 for v in a.target_mm],backend='cheetah',particles=a.particles,repeats=a.repeats,thread_budget=a.thread_budget,optics_budget=a.optics_budget,center_budget=a.center_budget)
     metadata=dict(schema_version=1,requested_episodes=a.episodes,seed_start=a.seed,workers=a.workers,base_config=base,
         started_at_utc=datetime.now(timezone.utc).isoformat(),source_sha256=provenance(),
         score_definition='SimEnv benchmark_score: lower is better; final_score averages fresh final-verification shots when available; last_shot_score is the unaveraged final shot.',
-        step_definition='One SimEnv.step per shot; repeats, replay and restoration included; reset shots counted separately. Episode totals include shared threading discovery plus both optimizer branches.',
+        step_definition='One SimEnv.step per shot; repeats, replay and restoration included; reset shots counted separately. Episode totals include both optimizer branches. few_shot threads separately per branch without discovery/replay overhead; fixed_budget includes shared discovery and threading replay.',
         screen_change_definition='A change in selected physical screen between consecutive acquired shots within a reset segment; identical screen requests and initial selection at reset do not count.',
         wall_time_definition='Seconds from perf_counter. Episode worker wall time includes first-use imports, calibrations, environment setup, both optimizer branches and data gathering before serialization. Batch wall time is actual elapsed parallel runtime; sums of episode times are not batch elapsed time.',
         data_definition='All acquired shot observations, actions, readbacks, scores and durations; screen images are not exported. Existing simulation outputs do not retain images.')

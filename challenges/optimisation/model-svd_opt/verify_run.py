@@ -20,7 +20,7 @@ def verify(directory):
         for row in center:assert set(row['action']['magnets'])==allowed
         # Repeated measurements retain genuine shot stochasticity.
         first=active[:summary['config']['repeats']]
-        if summary['config']['beam_variation']*summary['config']['beam_jitter'] or summary['config']['ripple']:
+        if len(first)>1 and (summary['config']['beam_variation']*summary['config']['beam_jitter'] or summary['config']['ripple']):
             assert any(not np.array_equal(first[0]['obs']['bpm_x'],r['obs']['bpm_x']) for r in first[1:]) or len(first)==1
     count=0
     for row in rows:
