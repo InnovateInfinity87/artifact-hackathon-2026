@@ -75,6 +75,15 @@ APERTURE_SUFFIXES = ("_pipe", "_col_in", "_col_out")
 LOSS_FRACTION = 1e-3  # an aperture losing more of the training sample than this is modelled
 
 
+def _exit_element(line, name):
+    """The line element at the exit of lattice element `name` (a sliced cavity's pieces are
+    named `<name>..<piece>`)."""
+    if name in line.element_index:
+        return name
+    pieces = [n for n in line.line.element_names if n.startswith(name + "..")]
+    return max(pieces, key=line.element_index.__getitem__)
+
+
 def aperture_checks(aperture_line, configs, sample, workers=4):
     """{config name: [(element, kind, a, b)]}: the apertures that lose particles of `sample`
     in each configuration, by the element they sit at (coordinates at its exit), with the
@@ -98,13 +107,13 @@ def aperture_checks(aperture_line, configs, sample, workers=4):
         for name, n in counts.items():
             if n < LOSS_FRACTION * len(sample) or not name.endswith(APERTURE_SUFFIXES):
                 continue
-            element = name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0]
+            element = _exit_element(aperture_line, name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0])
             limit = xl[name]
             if hasattr(limit, "a_squ"):
                 out.append((element, "ellipse", float(limit.a_squ) ** 0.5, float(limit.b_squ) ** 0.5))
             else:
                 out.append((element, "rect", float(limit.max_x), float(limit.max_y)))
-        checks[config.name] = out
+        checks[config.name] = sorted(set(out))
     return checks
 
 
