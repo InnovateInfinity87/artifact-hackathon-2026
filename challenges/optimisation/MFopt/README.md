@@ -35,5 +35,5 @@ env.step(env.optics_action(optics))      # load the optics (one step)
   response. `ranked()` sorts by it.
 
 Everything runs on the error-free model with the nominal beam: no environment steps.
-One target takes about a minute (re-match plus 208 finite-difference tracks), and
+One target takes 1.5 to 2.5 minutes (re-match plus 208 finite-difference tracks), and
 results are cached per target.
