@@ -80,8 +80,8 @@ class TargetOptics:
 
     target: tuple[float, float]  # requested (sigma_x, sigma_y), metres
     k1: dict[str, float]  # all 46 quadrupoles
-    quadrupoles: Modes
-    correctors: Modes  # both planes, `<corrector>_h` and `<corrector>_v`
+    quadrupoles: Modes | None  # None when asked for without modes
+    correctors: Modes | None  # both planes, `<corrector>_h` and `<corrector>_v`
     achieved: tuple[float, float]  # (sigma_x, sigma_y) in the model, metres
     transmission: float  # in the model, to the readout
     clipped: list[str] = field(default_factory=list)  # pinned at a limit
@@ -222,10 +222,17 @@ class OpticsEnv(SimEnv):
                      scores=dict(zip(knob_names, scores.tolist())))
 
     def optics_for_target(self, sigma_x: float, sigma_y: float,
-                          fraction: float = 0.99) -> TargetOptics:
+                          fraction: float = 0.99, modes: bool = True) -> TargetOptics:
         """The optics for a requested rms spot (metres) at the readout screen, and
-        the quadrupole and corrector modes about it. See the module docstring."""
-        key = (float(sigma_x), float(sigma_y), float(fraction))
+        the quadrupole and corrector modes about it. See the module docstring.
+
+        `modes=False` skips the two SVDs (the 208 finite-difference tracks) and
+        returns the optics alone, in about a quarter of the time."""
+        key = (float(sigma_x), float(sigma_y), float(fraction), modes)
+        if not modes:
+            full = (float(sigma_x), float(sigma_y), float(fraction), True)
+            if full in self._optics_cache:
+                return self._optics_cache[full]
         if key in self._optics_cache:
             return self._optics_cache[key]
         lo, hi = self._matched.axis[0], self._matched.axis[-1]
@@ -239,11 +246,12 @@ class OpticsEnv(SimEnv):
         def centroid(plus, minus, base, step):
             return (plus["stats"][:, :2] - minus["stats"][:, :2]) / (2 * step)
 
-        quads = self._modes(k1, list(self._matched.quadrupoles), QUAD_STEP,
-                            log_size, fraction)
-        correctors = [n for n in self.twin.magnet_names if n.endswith(("_h", "_v"))
-                      and "hvcor" in n]
-        kicks = self._modes(k1, correctors, CORRECTOR_STEP, centroid, fraction)
+        quads = kicks = None
+        if modes:
+            quads = self._modes(k1, list(self._matched.quadrupoles), QUAD_STEP,
+                                log_size, fraction)
+            kicks = self._modes(k1, self.corrector_names, CORRECTOR_STEP,
+                                centroid, fraction)
         final = self._probe(k1)
         readout = final["stats"][final["names"].index(self.config.target_screen)]
         result = TargetOptics(
@@ -254,6 +262,12 @@ class OpticsEnv(SimEnv):
             size_modes=self._size_modes.evaluate(*inside))
         self._optics_cache[key] = result
         return result
+
+    @property
+    def corrector_names(self) -> list[str]:
+        """Every corrector plane the agent may set, `_h` and `_v`."""
+        return [n for n in self.magnet_names
+                if self._knobs[n].prop in ("horizontal_angle", "vertical_angle")]
 
     def optics_action(self, optics: TargetOptics) -> dict:
         """An action for `step()` that loads the optics' quadrupoles."""
