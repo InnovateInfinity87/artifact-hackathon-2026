@@ -75,6 +75,15 @@ APERTURE_SUFFIXES = ("_pipe", "_col_in", "_col_out")
 LOSS_FRACTION = 1e-3  # an aperture losing more of the training sample than this is modelled
 
 
+def _exit_element(line, name):
+    """The line element at the exit of lattice element `name` (a sliced cavity's pieces are
+    named `<name>..<piece>`)."""
+    if name in line.element_index:
+        return name
+    pieces = [n for n in line.line.element_names if n.startswith(name + "..")]
+    return max(pieces, key=line.element_index.__getitem__)
+
+
 def aperture_checks(aperture_line, configs, sample, workers=4):
     """{config name: [(element, kind, a, b)]}: the apertures that lose particles of `sample`
     in each configuration, by the element they sit at (coordinates at its exit), with the
@@ -98,13 +107,13 @@ def aperture_checks(aperture_line, configs, sample, workers=4):
         for name, n in counts.items():
             if n < LOSS_FRACTION * len(sample) or not name.endswith(APERTURE_SUFFIXES):
                 continue
-            element = name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0]
+            element = _exit_element(aperture_line, name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0])
             limit = xl[name]
             if hasattr(limit, "a_squ"):
                 out.append((element, "ellipse", float(limit.a_squ) ** 0.5, float(limit.b_squ) ** 0.5))
             else:
                 out.append((element, "rect", float(limit.max_x), float(limit.max_y)))
-        checks[config.name] = out
+        checks[config.name] = sorted(set(out))
     return checks
 
 
@@ -123,14 +132,16 @@ class Maps:
     def __init__(self, keys, coef, exps, loss_radius, checks=None, order=None):
         self.checks = checks or {}  # config -> [(element, kind, a, b)], see aperture_checks
         self.order = order or {}  # element -> index along the line, for the checks
-        self.keys = [tuple(k) for k in keys]
+        self.keys = [tuple(k) for k in keys]  # every fitted map, screens and aperture checks
+        at_checks = {(c, e) for c, v in self.checks.items() for e, *_ in v if "_dia_scr_" not in e}
+        self.screen_keys = [k for k in self.keys if k not in at_checks]
         self.coef = coef  # terms x (2 * n_keys): x then y per key
         self.exps = exps
         self.loss_radius = loss_radius  # per key: start radius (in SCALE units) beyond which losses occur
 
     def coords(self, z, keys=None):
         """{key: (xy, alive)} for start coordinates z (N x 6)."""
-        keys = self.keys if keys is None else keys
+        keys = self.screen_keys if keys is None else keys
         extra = sorted({(c, e) for c, _ in keys for e, *_ in self.checks.get(c, ())} - set(keys))
         wanted = list(keys) + extra
         cols = [self.keys.index(k) for k in wanted]
@@ -150,7 +161,7 @@ class Maps:
 
     def indices(self, z, rng, keys=None):
         """Pixel index per key (as ment6d.track_all)."""
-        keys = self.keys if keys is None else keys
+        keys = self.screen_keys if keys is None else keys
         out = {}
         for k, (xy, alive) in self.coords(z, keys).items():
             c = np.zeros((len(z), 4))
@@ -240,7 +251,7 @@ class CombinedMaps:
 
     def __init__(self, narrow, broad, narrow_scale, radius=4.0):
         self.narrow, self.broad = narrow, broad
-        self.keys = narrow.keys
+        self.keys = narrow.screen_keys
         self.narrow_scale, self.radius = narrow_scale, radius
 
     def coords(self, z, keys=None):
