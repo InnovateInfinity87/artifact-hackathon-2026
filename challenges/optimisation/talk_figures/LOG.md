@@ -205,3 +205,13 @@ python3 -I scripts/make_anim_frames.py --theme dark --fps 12
 Key numbers (30 default days, seeds 1000-1029): stage A scores a mean of 0.49, with 30 % of days within 10 %, in about 5 steps. Stage A plus MF-BO scores 0.30 to 0.32, with 73 to 80 % within 10 %, in about 9 steps.
 
 Slide message: the model does most of the work for free, and the machine is spent only on what the model gets wrong.
+
+## MFopt: calibration + MF-BO on 100 days
+
+`mfopt/mfopt_workflow_calibrated.svg` is the episode workflow of the final MFopt policy (`--policies calibrated_mfbo`): calibrate the day's beam in the twin from the free reset reading, load the re-matched optics with the FEH correctors already aimed, steer, refit after every reading, then MF-BO with the calibrated twin as low fidelity.
+
+`mfopt/mfopt_100_episodes_{score,steps,wall_time_s,screen_moves}.{png,pdf}` are histograms over 100 fresh days (seeds 2000-2099), and `mfopt_100_episodes_all.*` all four in one figure; `mfopt/mfopt_100_episodes.json` holds the summary and every episode (target, score, steps, wall time, screen moves, final reading, per-step trace). Made by `scripts/mfopt_episode_stats.py` from `MFopt/results/calibrated_mfbo_100.json`.
+
+Key numbers: score mean 0.40, median 0.29 (10th to 90th percentile 0.16 to 0.72); 62 % of days within 10 % of the request; 8.7 steps on average, median 7; no screen moves (the policy reads only the readout screen and the BPMs); wall time 258 s per episode with 16 episodes sharing the machine. Requests below 0.135 mm in x (29 days) average 0.51 because FEH Q2 cannot go past 100 A; the other days average 0.35.
+
+Slide message: a physics model of the day's beam, fitted from every reading including the free one at reset, gets the spot in a median of 7 shots.

@@ -91,14 +91,15 @@ class SpotBO:
     """One episode's stage D, started after stage A on `session`."""
 
     def __init__(self, session: Session, k1: dict[str, float], model: dict,
-                 n_model: int = 256, seed: int = 0):
+                 n_model: int = 256, seed: int = 0, aim: dict[str, float] | None = None):
         self.session = session
         self.env = env = session.env
         self.target = session.target
         self.model = model  # stage A responses: J_spot for the FEH correctors
         self.centre = np.array([session.settings()[n] for n in KNOBS])
         self.half = self._half_ranges(k1)
-        self.base = {**_corrector_zero(env), **k1,
+        # `aim`: FEH corrector settings that put the twin's spot on the request
+        self.base = {**_corrector_zero(env), **(aim or {}), **k1,
                      **{n: env.twin._knobs[n].value for n in SEXTUPOLES}}
         self.rng = np.random.default_rng(seed)
         # the low fidelity: Sobol points over the box, through the model

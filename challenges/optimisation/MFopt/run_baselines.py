@@ -24,11 +24,23 @@ def _mfbo(session) -> None:
     mfbo(session)
 
 
+def _calibrated(session) -> None:
+    from .calibrate import calibrated
+    calibrated(session)
+
+
+def _calibrated_mfbo(session) -> None:
+    from .calibrate import calibrated_mfbo
+    calibrated_mfbo(session)
+
+
 POLICIES = {
     "do_nothing": lambda session: None,
     "optics_only": optics_only,
     "optics_and_steering": optics_and_steering,
     "mfbo": _mfbo,
+    "calibrated": _calibrated,
+    "calibrated_mfbo": _calibrated_mfbo,
 }
 
 _env: OpticsEnv | None = None
