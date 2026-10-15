@@ -186,6 +186,45 @@ Reproduce with `evaluate.py --episodes 100 --seed 1234 --workers 50`. Numbers ar
 `results_100.json` and `results_ablation.json`. Give `--workers` at least as many
 slots as there are episodes, or the leftovers queue for a whole extra wave.
 
+### Where the wall clock goes
+
+One episode, measured uncontended, with the stages timed separately:
+
+| | laptop (12 core) | apml1 (64 core) |
+|---|---|---|
+| per episode | **~270 s** (247–287) | **~430 s** (391–470) |
+
+apml1 is *slower* per episode — about half the per-core speed. It wins only by
+running fifty at once, which is why a 100-episode study takes ~40 minutes there and
+would take seven hours here. Pick the box by how many episodes you want, not how
+fast you want one.
+
+Within an episode, in rough order (seed 1234 on apml1, 470 s):
+
+| stage | s | what it is |
+|---|---|---|
+| CEM | 208 | 128 candidates × 4 rounds per exploring shot |
+| optics lookup | 105 | 278 full-lattice tracks, see below |
+| system ID | 80 | Adam through Cheetah onto the shot history |
+| Adam (plan polish) | 66 | 12 gradient steps per shot |
+| Jacobians | 3 | one batched track each for calibration and placement |
+
+**The optics lookup is 278 serial tracks** of the whole 655-element line: 93 for the
+quadrupole beam-size SVD (46 quads, central differences), 113 for the corrector
+centroid SVD (56 planes), ~71 for the `least_squares` re-match of the four
+final-focus quadrupoles, and one at the end. It is cached per target and every
+episode draws a new one, so every episode pays in full.
+
+Two easy savings sit in `MFopt/optics_env.py` rather than here. **41 % of the lookup
+builds a corrector ranking this pipeline no longer uses** — steering is off and
+`focus_correctors` is 0, so `optics.correctors` is only read for knob names in a loop
+that never runs. And the quadrupole ranking barely changes between nearby requests,
+so caching it across targets and re-running only the four-quad match would take the
+lookup to about a quarter of its cost. Together that is most of the 105 s.
+
+After those, CEM is the thing to attack, and `explore` — running it only when the
+tune is actually stuck — is the lever already in place.
+
 ### Cost per episode
 
 Measured on seed 1234: 25 shots on the machine, 290,000 particle-tracks. The optics

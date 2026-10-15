@@ -776,38 +776,35 @@
   <p class="kicker">Strategies</p>
   <h2>6. Tweak the tune, three: BO and RCDS inside the SVD subspace</h2>
   <div class="cols">
-    <div class="col">
+    <div class="col narrow">
       <ul>
         <li>The same four stages, run straight on the machine: calibrate and reset,
             <strong>thread</strong>, correct the <em>measured</em> size, centre on the screen.</li>
         <li>The search never leaves the <strong>five dominant quadrupole modes</strong>,
             and the modal boxes are sized so every proposal is already inside every
             magnet limit &mdash; no clipping, ever.</li>
-        <li>Two branches from the same replayed start, same budget: <strong>BO</strong>
-            (joint GP, EI then LCB) and <strong>RCDS</strong>.</li>
-        <li>Threading earns its keep: on the stress case &mdash; 0.3 mm request,
-            five times the survey error &mdash; the beam starts at
-            <strong>1.4% transmission reaching 24 of 31 BPMs</strong>, and comes back to
-            all 31 and a valid screen before either optimiser starts.</li>
+        <li>Two branches from the same start: <strong>BO</strong> (joint GP, EI then LCB)
+            and <strong>RCDS</strong>. Every proposal is one fresh shot &mdash; no
+            three-shot averaging, no replay.</li>
+        <li><strong>Then they were taught when to stop:</strong> the same tolerance and
+            patience the RL focus uses, and for BO, stop once expected improvement is
+            worth less than the shot it would cost.</li>
       </ul>
-    </div>
-    <div class="col">
-      <table>
-        <thead><tr><th>100 episodes, 1&times;1 mm</th><th class="num">Score</th><th class="num">Median</th></tr></thead>
+      <table style="margin-top:0.5em;">
+        <thead><tr><th>100 episodes</th><th class="num">Shots</th><th class="num">Score</th><th class="num">Median</th></tr></thead>
         <tbody>
-          <tr><td>BO branch</td><td class="num">1.57</td><td class="num">1.52</td></tr>
-          <tr><td>RCDS branch</td><td class="num">1.49</td><td class="num">1.40</td></tr>
+          <tr><td>BO</td><td class="num">5.6</td><td class="num good"><strong>0.43</strong></td><td class="num good"><strong>0.38</strong></td></tr>
+          <tr><td>RCDS</td><td class="num">6.2</td><td class="num">0.50</td><td class="num">0.43</td></tr>
         </tbody>
       </table>
-      <p class="footnote">Seeds 42&ndash;141, Cheetah, 10k particles, three shots per
-        evaluation; 98 of 100 episodes finished. The score carries a cost term and these
-        branches spend about 190 steps, so it is not comparable with the tables to come.</p>
-      <ul style="margin-top:0.4em;">
-        <li>Delivered, on a 1 mm request: <strong>98.4% transmission</strong> at
-            1.06 &times; 0.98 mm, centroid inside 40 &micro;m.</li>
-        <li>Run again through <strong>xsuite</strong> instead of Cheetah, the same workflow
-            lands in the same place.</li>
-      </ul>
+      <p class="footnote"><strong>That stopping rule cut the shots by 97%</strong>
+        &mdash; 192 a branch down to six &mdash; and the residual did not get worse.
+        BO lands inside 10% of the request on 51% of days, inside 25% on 87%.</p>
+    </div>
+    <div class="col wide" style="text-align:center;">
+      <img src="model_svd_opt/model_svd_opt_100_episodes_all.png"
+           alt="Histograms of shots and final score per episode, BO and RCDS"
+           style="max-height:64vh; width:auto; max-width:100%;">
     </div>
   </div>
 </section>
@@ -986,28 +983,28 @@
         <td class="num">258 s</td><td class="num">100</td>
       </tr>
       <tr class="hero">
+        <td><strong>SVD subspace, BO</strong></td>
+        <td class="num">0.43</td><td class="num">0.38</td>
+        <td class="num">5.6</td><td class="num best">0</td>
+        <td class="num best">4 s</td><td class="num">100</td>
+      </tr>
+      <tr class="hero">
+        <td><strong>SVD subspace, RCDS</strong></td>
+        <td class="num">0.50</td><td class="num">0.43</td>
+        <td class="num">6.2</td><td class="num best">0</td>
+        <td class="num">4 s</td><td class="num">100</td>
+      </tr>
+      <tr class="hero">
         <td><strong>Model-based RL</strong></td>
         <td class="num">0.77</td><td class="num">0.57</td>
-        <td class="num best">6.5</td><td class="num best">0</td>
+        <td class="num">6.5</td><td class="num best">0</td>
         <td class="num">270 s</td><td class="num">100</td>
       </tr>
       <tr>
         <td>Optics + placement <span class="muted">(two linear solves)</span></td>
         <td class="num">1.00</td><td class="num">0.81</td>
-        <td class="num">2.0</td><td class="num best">0</td>
-        <td class="num best">7 s</td><td class="num">100</td>
-      </tr>
-      <tr>
-        <td>SVD subspace, RCDS branch</td>
-        <td class="num">1.49</td><td class="num">1.40</td>
-        <td class="num">188</td><td class="num best">0</td>
-        <td class="num">35 s</td><td class="num">100</td>
-      </tr>
-      <tr>
-        <td>SVD subspace, BO branch</td>
-        <td class="num">1.57</td><td class="num">1.52</td>
-        <td class="num">190</td><td class="num best">0</td>
-        <td class="num">36 s</td><td class="num">100</td>
+        <td class="num best">2.0</td><td class="num best">0</td>
+        <td class="num">7 s</td><td class="num">100</td>
       </tr>
       <tr class="baseline">
         <td>Reference optics only</td>
@@ -1022,13 +1019,16 @@
     </tbody>
   </table>
   <ul style="margin-top:0.7em;">
-    <li><strong>Every one of them beats the morning</strong>, moves a screen exactly zero
-        times, and thinks for under five minutes while doing it.</li>
-    <li>The two that fit a model of the day win on score; the two that search a subspace
-        pay a hundred times the steps for a worse one. <strong>Knowing the machine beats
-        searching it.</strong></li>
-    <li>And two linear solves &mdash; load the optics, place the spot &mdash; get within
-        a factor of two and a half of the best of them, in 2 shots and 7 seconds.</li>
+    <li><strong>Four methods, four philosophies, and they land within 0.37 of each
+        other</strong> &mdash; against 9.65 for doing nothing. Every one moves a screen
+        zero times and gets there in under ten shots.</li>
+    <li><strong>What separated them in the end was not the search. It was knowing when to
+        stop.</strong> The SVD subspace went from 192 shots to 5.6 and from 1.57 to 0.43
+        by adopting the RL focus's tolerance-and-patience rule. Same optimiser, same
+        subspace, same machine.</li>
+    <li>And two linear solves &mdash; load the optics, place the spot &mdash; get within a
+        factor of two and a half of the best of them, in 2 shots and 7 seconds. Whatever
+        you build, it has to beat that.</li>
   </ul>
   <p class="footnote">Different draws of days (seeds 2000&ndash;2099, 1234&ndash;1333,
     42&ndash;141) and different targets for the SVD rows, so these are the same benchmark
@@ -1078,10 +1078,11 @@
     <li><strong>Re-measure the survey-error fit.</strong> It was worth a third of the
         score on the old coupled pipeline. Nobody has checked what it is worth now that
         size and position are separate stages, and it is still off by default.</li>
-    <li><strong>Put the three tuners in the same room.</strong> MF-BO gets there in eight
-        shots, the RL agent in six and a half, the SVD workflow threads a beam the others
-        would never find. They now at least run on the same machine &mdash; but not on the
-        same seeds, and until they do we cannot say which one we would take to a shift.</li>
+    <li><strong>Put the three tuners in the same room.</strong> They now finish within
+        0.37 of each other in five to nine shots, on the same machine &mdash; but not on
+        the same seeds, and not on the same requests: the SVD runs ask for 1&times;1 mm
+        every time. Until that is one experiment we cannot say which one we would take to
+        a shift.</li>
     <li><strong>Beat the jitter floor.</strong> A single reading is worth 0.2 to 0.3 of
         score on its own. Averaging shots costs budget; a noise model in the GP might not.</li>
     <li><strong>Mind the currents.</strong> Every knob here is in model units. The lattice
