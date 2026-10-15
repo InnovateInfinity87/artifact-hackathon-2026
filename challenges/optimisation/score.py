@@ -102,7 +102,9 @@ TUNABLE = {  # what a tuner may change, by element type
 }
 # A dipole angle is the geometry of the machine rather than a tune, so dipoles are
 # not tunable by type. The VBC is the exception: it is a *variable* bunch
-# compressor, set like any other knob, up to 120 mrad.
+# compressor, set like any other knob. The lattice file runs it at 131.7 mrad,
+# R56 = -57.6 mm, the maximum compression into FEBE measured on CLARA (IPAC
+# THP2100); the SimEnv knob goes up to 135 mrad, R56 = -60.5 mm.
 VBC_DIPOLES = ("cla_vbc_mag_dip_01", "cla_vbc_mag_dip_02",
                "cla_vbc_mag_dip_03", "cla_vbc_mag_dip_04")
 TUNABLE_BY_NAME = {name: ("angle",) for name in VBC_DIPOLES}
