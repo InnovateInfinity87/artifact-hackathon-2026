@@ -19,11 +19,12 @@ optics.correctors.ranked(6)              # corrector planes, `_h` and `_v`
 env.step(env.optics_action(optics))      # load the optics (one step)
 ```
 
-- **Optics.** Starts from the matched family in `optics_matching/` (`MatchedOptics`),
-  whose 42-quadrupole prefix carries the beam through the apertures. That family was
-  matched in xsuite with the VBC and L4H off, so the four final-focus quadrupoles
-  (FEA Q15/Q16, FEH Q1/Q2) are re-matched to the request in an error-free copy of the
-  environment (VBC on, L4H on, apertures on, Cheetah), within the magnet limits.
+- **Optics.** Starts from the 144 nodes rematched with the VBC on at 131.7 mrad
+  (`optics_matching_vbc_on/`), interpolated in log size. Those were fitted in
+  second-order Cheetah, and in this environment's first-order model their spot is off
+  by up to about 30 %, so the four final-focus quadrupoles (FEA Q15/Q16, FEH Q1/Q2)
+  are re-matched to the request in an error-free copy of the environment (VBC on,
+  L4H on, apertures on), within the magnet limits.
   `optics.achieved`, `optics.transmission` and `optics.clipped` say how well that went.
 - **Quadrupole modes.** SVD of d ln(rms size) / d k1 at every screen and the readout,
   for all 46 quadrupoles. Rows and weights follow `SizeModes` (the readout carries
@@ -37,3 +38,27 @@ env.step(env.optics_action(optics))      # load the optics (one step)
 Everything runs on the error-free model with the nominal beam: no environment steps.
 One target takes 1.5 to 2.5 minutes (re-match plus 208 finite-difference tracks), and
 results are cached per target.
+
+## Steering responses and MF-BO knobs per spot: `responses.py`
+
+```python
+from MFopt.responses import DOF, ResponseTable
+
+table = ResponseTable()                  # MFopt/data/responses_vbc_on.npz
+at = table.at(150e-6, 250e-6)            # bilinear in log size between nodes
+at["R"]      # centroid response: BPM x, BPM y, screen x, y  x  all 58 corrector planes
+at["orbit"]  # the model's centroids at the same rows: what steering aims for
+at["J"]      # readout (mu_x, mu_y, sigma_x, sigma_y, T)  x  DOF
+```
+
+- **MF-BO knobs (`DOF`).** The five quadrupoles closest to the IP (FEA Q14, Q15,
+  Q16, FEH Q1, Q2), the five correctors per plane closest to it (FEA HVCOR 04, 05,
+  06, FEH HVCOR 01, 02) and the two FEA sextupoles.
+- **Table.** Built at every node of the VBC-on grid after the final-focus re-match,
+  in the error-free first-order model: `k1`, `readout`, `clipped`, `feasible`
+  (T >= 95 % and both sizes within 5 %), `relative_error`.
+- **Rebuild.** `python -m MFopt.responses --workers 4` from `challenges/optimisation`,
+  about 35 minutes on 4 cores.
+
+Stage A steering (`steering.py`) reads the orbit and spot responses from this table
+instead of tracking them per episode.

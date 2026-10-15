@@ -5,12 +5,11 @@ at the readout screen, three questions an optimiser needs before it touches the
 machine:
 
 1. **Which optics?** The quadrupole k1s that give that spot. They start from the
-   matched family in `optics_matching/` (`MatchedOptics`), whose 42 upstream
-   strengths are a retuned prefix that carries the beam through the apertures. The
-   family was matched in xsuite with the VBC off and L4H off, so in this
-   environment's model (VBC on, L4H on, Cheetah) its four final-focus strengths
-   miss the requested spot by up to a factor of six. They are re-matched here, in
-   an error-free copy of the environment, within the environment's magnet limits.
+   144 nodes rematched with the VBC on (`optics_matching_vbc_on/`, 131.7 mrad),
+   interpolated in log size. Those were fitted in second-order Cheetah; in this
+   environment's first-order model their spot is off by up to about 30 %, so the
+   four final-focus strengths are re-matched here, in an error-free copy of the
+   environment, within the environment's magnet limits.
 2. **Which quadrupoles matter?** The SVD of the weighted response of ln(beam size)
    at every screen and the readout to every quadrupole, at that optics. Rows and
    weights follow `SizeModes` (the readout carries half of the squared weight), but
@@ -34,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import least_squares
 
 CHALLENGE_DIR = Path(__file__).resolve().parents[1]
@@ -41,9 +41,42 @@ for path in (CHALLENGE_DIR, CHALLENGE_DIR / "RL_framework"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from optics_matching import MatchedOptics, SizeModes  # noqa: E402
+from optics_matching import SizeModes  # noqa: E402
 from rl_framework.config import RLConfig  # noqa: E402
 from rl_framework.envs.sim_env import BPM_TAG, SCREEN_TAG, SimEnv  # noqa: E402
+
+# The 144 nodes rematched with the VBC on at 131.7 mrad (second-order Cheetah,
+# apertures): Eiad's 42-quad prefix kept, the 30 quads after the VBC refitted.
+NODES = CHALLENGE_DIR / "optics_matching_vbc_on" / "results" / "rematched_grid_vbc_on.npz"
+
+
+class RematchedNodes:
+    """The VBC-on node table, interpolated bilinearly in ln(sigma_x), ln(sigma_y).
+
+    Requests outside 0.1 to 20 mm are clamped to the grid. `feasible` marks the
+    nodes the rematch closed (transmission >= 95 %, size error <= 5 %)."""
+
+    def __init__(self, path: Path = NODES):
+        with np.load(path) as data:
+            self.quadrupoles = data["quadrupoles"].tolist()
+            self.axis = data["spot_sizes_m"]
+            self.k1 = data["k1"]
+            self.transmission = data["transmission"]
+            achieved = data["actual_sizes_m"]
+        target = np.stack(np.meshgrid(self.axis, self.axis, indexing="ij"), axis=-1)
+        error = np.abs(achieved / target - 1).max(axis=-1)
+        self.feasible = (self.transmission >= 0.95) & (error <= 0.05)
+        log = np.log(self.axis)
+        self._k1 = RegularGridInterpolator((log, log), self.k1)
+
+    def clamp(self, sigma_x: float, sigma_y: float) -> tuple[float, float]:
+        lo, hi = self.axis[0], self.axis[-1]
+        return float(np.clip(sigma_x, lo, hi)), float(np.clip(sigma_y, lo, hi))
+
+    def evaluate(self, sigma_x: float, sigma_y: float) -> dict[str, float]:
+        point = np.log(self.clamp(sigma_x, sigma_y))
+        return dict(zip(self.quadrupoles, self._k1(point)[0].tolist()))
+
 
 # The magnets the matched family varies with the requested spot; the other 42 are
 # a fixed prefix.
@@ -108,7 +141,7 @@ class OpticsEnv(SimEnv):
 
     def __init__(self, config: RLConfig | None = None):
         super().__init__(config or RLConfig())
-        self._matched = MatchedOptics()
+        self.nodes = RematchedNodes()
         self._size_modes = SizeModes()
         self._twin: SimEnv | None = None
         self._optics_cache: dict[tuple[float, float, float], TargetOptics] = {}
@@ -235,9 +268,8 @@ class OpticsEnv(SimEnv):
                 return self._optics_cache[full]
         if key in self._optics_cache:
             return self._optics_cache[key]
-        lo, hi = self._matched.axis[0], self._matched.axis[-1]
-        inside = (float(np.clip(sigma_x, lo, hi)), float(np.clip(sigma_y, lo, hi)))
-        start = self._matched.evaluate(*inside)["settings"]
+        inside = self.nodes.clamp(sigma_x, sigma_y)
+        start = self.nodes.evaluate(*inside)
         k1, clipped = self._match((sigma_x, sigma_y), start)
 
         def log_size(plus, minus, base, step):
@@ -248,7 +280,7 @@ class OpticsEnv(SimEnv):
 
         quads = kicks = None
         if modes:
-            quads = self._modes(k1, list(self._matched.quadrupoles), QUAD_STEP,
+            quads = self._modes(k1, list(self.nodes.quadrupoles), QUAD_STEP,
                                 log_size, fraction)
             kicks = self._modes(k1, self.corrector_names, CORRECTOR_STEP,
                                 centroid, fraction)

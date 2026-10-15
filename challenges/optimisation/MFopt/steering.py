@@ -73,24 +73,88 @@ def responses(env: OpticsEnv, settings: dict[str, float]) -> dict:
     return result
 
 
+def table_responses(env: OpticsEnv, sigma_x: float, sigma_y: float) -> dict:
+    """The same as `responses`, read from the precomputed node table
+    (`MFopt.responses`), interpolated to the requested size: no tracking."""
+    from .responses import ResponseTable
+    global _table
+    if _table is None:
+        _table = ResponseTable()
+    at = _table.at(sigma_x, sigma_y)
+    nb = len(_table.bpms)
+    upstream = [c for c in env.corrector_names if c not in FINAL_CORRECTORS]
+    up = [_table.correctors.index(c) for c in upstream]
+    final = [_table.correctors.index(c) for c in FINAL_CORRECTORS]
+    return {
+        "bpms": _table.bpms, "upstream": upstream,
+        "orbit_x": at["orbit"][:nb], "orbit_y": at["orbit"][nb:2 * nb],
+        "R_bpm": at["R"][:2 * nb][:, up],
+        "spot": at["orbit"][2 * nb:], "J_spot": at["R"][2 * nb:][:, final],
+    }
+
+
+_table = None
+
+
 def _clip(env: OpticsEnv, name: str, value: float) -> float:
     knob = env._knobs[name]
     return float(np.clip(value, knob.low, knob.high))
 
 
+def _upstream_of(model: dict, bpms: np.ndarray) -> np.ndarray:
+    """Which correctors move at least one of these BPMs in the model."""
+    nb = len(model["bpms"])
+    rows = np.concatenate([bpms, bpms + nb])
+    return np.abs(model["R_bpm"][rows]).max(axis=0) > 0
+
+
 def steer_orbit(session: Session, model: dict, rcond: float = 1e-3) -> dict:
-    """One shot of SVD steering to the model's orbit."""
+    """One shot of SVD steering to the model's orbit, on the BPMs that read.
+
+    When the beam is lost part way, R is cropped to the BPMs with a reading
+    (rows) and to the correctors upstream of the last of them (columns)."""
     obs = session.last.obs
-    valid = np.concatenate([obs["bpm_valid"], obs["bpm_valid"]]).astype(bool)
+    live = np.flatnonzero(obs["bpm_valid"])
+    if live.size == 0:
+        return {}
+    nb = len(model["bpms"])
+    rows = np.concatenate([live, live + nb])
+    columns = _upstream_of(model, live)
     error = np.concatenate([obs["bpm_x"] - model["orbit_x"],
-                            obs["bpm_y"] - model["orbit_y"]])
-    R = model["R_bpm"][valid]
-    kicks = -np.linalg.pinv(R, rcond=rcond) @ error[valid]
+                            obs["bpm_y"] - model["orbit_y"]])[rows]
+    R = model["R_bpm"][np.ix_(rows, columns)]
+    kicks = -np.linalg.pinv(R, rcond=rcond) @ error
     now = session.settings()
+    names = [n for n, c in zip(model["upstream"], columns) if c]
     action = {name: _clip(session.env, name, now[name] + dk)
-              for name, dk in zip(model["upstream"], kicks)}
+              for name, dk in zip(names, kicks)}
     session.step({"magnets": action})
     return action
+
+
+def _reach(reading) -> tuple[int, float]:
+    """How far the beam gets: BPMs with a reading, then transmission."""
+    return int(reading.obs["bpm_valid"].sum()), float(reading.info["transmission"])
+
+
+def thread(session: Session, model: dict, max_shots: int = 8,
+           rcond: float = 1e-3) -> None:
+    """Get the beam to the end of the line: steer on the BPMs that read and
+    repeat while BPMs are missing. A shot that loses ground is undone, and the
+    next one keeps fewer singular values (gentler, better-conditioned kicks)."""
+    best = session.last
+    for _ in range(max_shots):
+        if best.obs["bpm_valid"].all() and best.info["on_screen"]:
+            return
+        if session.last is not best:
+            session.step({"magnets": dict(best.info["magnets"])})
+        steer_orbit(session, model, rcond)
+        if _reach(session.last) > _reach(best):
+            best = session.last
+        else:
+            rcond = min(rcond * 10, 0.1)
+    if session.last is not best:
+        session.step({"magnets": dict(best.info["magnets"])})
 
 
 def steer_spot(session: Session, model: dict) -> dict:
@@ -115,13 +179,17 @@ def optics_only(session: Session) -> None:
 
 
 def optics_and_steering(session: Session, orbit_shots: int = 2,
-                        spot_shots: int = 3) -> None:
+                        spot_shots: int = 3, table: bool = True) -> None:
     """Stage A: the target optics, SVD orbit steering, then the spot on target."""
     env = session.env
     t = session.target
     optics = env.optics_for_target(t[2], t[3], modes=False)
     session.step({"magnets": dict(optics.k1)})
-    model = responses(env, {**_corrector_zero(env), **optics.k1})
+    if table:
+        model = table_responses(env, t[2], t[3])
+    else:
+        model = responses(env, {**_corrector_zero(env), **optics.k1})
+    thread(session, model)
     for _ in range(orbit_shots):
         steer_orbit(session, model)
     for _ in range(spot_shots):
