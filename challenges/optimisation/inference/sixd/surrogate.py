@@ -52,7 +52,7 @@ def _track_coords(args):
     line = ment6d._LINE
     sample = ment6d._SAMPLE
     full6d.apply_config(line, config)
-    order = sorted(config.screens, key=line.element_index.__getitem__)
+    order = sorted(set(config.screens) | set(_EXTRA.get(config.name, ())), key=line.element_index.__getitem__)
     particles = ment6d.xsuite_model._particles(sample, line.converted.initial_energy_ev)
     out, start = {}, 0
     for screen in order:
@@ -70,6 +70,44 @@ def _track_coords(args):
     return config.name, out
 
 
+_EXTRA = {}  # config name -> elements to record besides its screens (aperture checks)
+APERTURE_SUFFIXES = ("_pipe", "_col_in", "_col_out")
+LOSS_FRACTION = 1e-3  # an aperture losing more of the training sample than this is modelled
+
+
+def aperture_checks(aperture_line, configs, sample, workers=4):
+    """{config name: [(element, kind, a, b)]}: the apertures that lose particles of `sample`
+    in each configuration, by the element they sit at (coordinates at its exit), with the
+    limit's half widths. kind is "rect" or "ellipse"."""
+    import collections
+
+    xl = aperture_line.line
+    names = xl.element_names
+    checks = {}
+    for config in configs:
+        full6d.apply_config(aperture_line, config)
+        last = max(aperture_line.element_index[s] for s in config.screens)
+        particles = ment6d.xsuite_model._particles(sample, aperture_line.converted.initial_energy_ev)
+        xl.track(particles, ele_start=0, ele_stop=last + 1)
+        aperture_line.restore_nominal_quads()
+        full6d.set_tdc_voltage(aperture_line, 0.0)
+        full6d.set_rf_phases(xl, {})
+        lost = np.asarray(particles.state) <= 0
+        counts = collections.Counter(names[i] for i in np.asarray(particles.at_element)[lost])
+        out = []
+        for name, n in counts.items():
+            if n < LOSS_FRACTION * len(sample) or not name.endswith(APERTURE_SUFFIXES):
+                continue
+            element = name.rsplit("_", 2 if name.endswith(("_col_in", "_col_out")) else 1)[0]
+            limit = xl[name]
+            if type(limit).__name__ == "LimitEllipse":
+                out.append((element, "ellipse", float(limit.a), float(limit.b)))
+            else:
+                out.append((element, "rect", float(limit.max_x), float(limit.max_y)))
+        checks[config.name] = out
+    return checks
+
+
 def track_coords(line, sample, configs, workers=4):
     import multiprocessing as mp
 
@@ -82,7 +120,9 @@ def track_coords(line, sample, configs, workers=4):
 class Maps:
     """Fitted polynomial maps for a list of (config, screen) keys."""
 
-    def __init__(self, keys, coef, exps, loss_radius):
+    def __init__(self, keys, coef, exps, loss_radius, checks=None, order=None):
+        self.checks = checks or {}  # config -> [(element, kind, a, b)], see aperture_checks
+        self.order = order or {}  # element -> index along the line, for the checks
         self.keys = [tuple(k) for k in keys]
         self.coef = coef  # terms x (2 * n_keys): x then y per key
         self.exps = exps
@@ -91,11 +131,22 @@ class Maps:
     def coords(self, z, keys=None):
         """{key: (xy, alive)} for start coordinates z (N x 6)."""
         keys = self.keys if keys is None else keys
-        cols = [self.keys.index(k) for k in keys]
+        extra = sorted({(c, e) for c, _ in keys for e, *_ in self.checks.get(c, ())} - set(keys))
+        wanted = list(keys) + extra
+        cols = [self.keys.index(k) for k in wanted]
         sel = np.ravel([[2 * i, 2 * i + 1] for i in cols])
         xy = monomials(z, self.exps) @ self.coef[:, sel]
         r = np.sqrt(((z / SCALE) ** 2).sum(1))
-        return {k: (xy[:, 2 * j: 2 * j + 2], r < self.loss_radius[i]) for j, (i, k) in enumerate(zip(cols, keys))}
+        at = {k: xy[:, 2 * j: 2 * j + 2] for j, k in enumerate(wanted)}
+        out = {}
+        for i, k in zip(cols, keys):
+            alive = r < self.loss_radius[i]
+            for element, kind, a, b in self.checks.get(k[0], ()):
+                if self.order[element] < self.order.get(k[1], np.inf):
+                    u, v = at[(k[0], element)].T
+                    alive &= ((u / a) ** 2 + (v / b) ** 2 <= 1) if kind == "ellipse" else ((np.abs(u) <= a) & (np.abs(v) <= b))
+            out[k] = (at[k], alive)
+        return out
 
     def indices(self, z, rng, keys=None):
         """Pixel index per key (as ment6d.track_all)."""
@@ -108,17 +159,24 @@ class Maps:
         return out
 
     def save(self, path=OUT):
+        import json
+
         np.savez_compressed(path, keys=np.array([f"{c}|{s}" for c, s in self.keys]), coef=self.coef,
-                            exps=self.exps, loss_radius=self.loss_radius)
+                            exps=self.exps, loss_radius=self.loss_radius,
+                            checks=json.dumps(self.checks), order=json.dumps(self.order))
 
     @classmethod
     def load(cls, path=OUT):
+        import json
+
         d = np.load(path)
-        return cls([tuple(k.split("|")) for k in d["keys"]], d["coef"], d["exps"], d["loss_radius"])
+        checks = json.loads(str(d["checks"])) if "checks" in d else {}
+        order = json.loads(str(d["order"])) if "order" in d else {}
+        return cls([tuple(k.split("|")) for k in d["keys"]], d["coef"], d["exps"], d["loss_radius"], checks, order)
 
 
 def fit(line, configs, n_train=60_000, order=ORDER, seed=11, workers=4, log=print, cov=None,
-        scale=1.0):
+        scale=1.0, aperture_line=None):
     """Fit on a Gaussian training sample: diagonal SCALE * scale, or covariance `cov` (e.g.
     1.5^2 times the current reconstruction's) when given; the maps are accurate where the
     training sample is, which matters on the dispersive FEA screens."""
@@ -128,7 +186,16 @@ def fit(line, configs, n_train=60_000, order=ORDER, seed=11, workers=4, log=prin
         z = rng.normal(0, 1, (n_train, 6)) * SCALE * scale
     else:
         z = rng.multivariate_normal(np.zeros(6), cov, n_train)
-    tracked = track_coords(line, z, configs, workers)
+    checks = {}
+    if aperture_line is not None:
+        checks = aperture_checks(aperture_line, configs, z)
+        log("aperture checks", {c: [e for e, *_ in v] for c, v in checks.items()})
+    _EXTRA.clear()
+    _EXTRA.update({c: [e for e, *_ in v] for c, v in checks.items()})
+    try:
+        tracked = track_coords(line, z, configs, workers)
+    finally:
+        _EXTRA.clear()
     log(f"tracked {n_train} training particles in {time.time() - t0:.0f} s")
     exps = exponents(order)
     phi = monomials(z, exps)
@@ -142,7 +209,9 @@ def fit(line, configs, n_train=60_000, order=ORDER, seed=11, workers=4, log=prin
         good = alive & (r < loss_radius[i])
         coef[:, 2 * i: 2 * i + 2] = np.linalg.lstsq(phi[good], xy[good], rcond=None)[0]
     log(f"fitted {len(keys)} maps, order {order}, {len(exps)} terms, {time.time() - t0:.0f} s")
-    return Maps(keys, coef, exps, loss_radius), tracked, z
+    order_index = {e: line.element_index[e] for v in checks.values() for e, *_ in v}
+    order_index.update({k[1]: line.element_index[k[1]] for k in keys})
+    return Maps(keys, coef, exps, loss_radius, checks, order_index), tracked, z
 
 
 def validate(maps, line, configs, beam, log=print):
@@ -216,16 +285,25 @@ def steering_estimate(path=common.HERE.parent / "steering" / "result_bpm_nominal
     return {q: tuple(np.array(v["estimate_um"]) * 1e-6) for q, v in r["quad_offsets"]["per_quad"].items()}
 
 
-def fit_with_offsets(line, configs, quad_offsets, tag, log=print):
-    """Broad and narrow maps of the model with the given quadrupole offsets."""
-    for q, (dx, dy) in quad_offsets.items():
-        line.line[q].shift_x, line.line[q].shift_y = dx, dy
+def fit_with_offsets(line, configs, quad_offsets, tag, log=print, aperture_line=None, kicks=None):
+    """Broad and narrow maps of the model with the given quadrupole offsets (and corrector
+    kicks); with `aperture_line` the maps also say which particles its apertures lose."""
+    lines = [line] + ([aperture_line] if aperture_line is not None else [])
+    for ln in lines:
+        for q, (dx, dy) in quad_offsets.items():
+            ln.line[q].shift_x, ln.line[q].shift_y = dx, dy
+        for c, (h, v) in (kicks or {}).items():
+            ln.set_corrector(c, h, v)
     try:
-        broad, _, _ = fit(line, configs, log=log)
+        broad, _, _ = fit(line, configs, log=log, aperture_line=aperture_line)
         broad.save(OUT.with_name(OUT.stem + tag + ".npz"))
-        narrow, _, _ = fit(line, configs, order=NARROW["order"], scale=NARROW["scale"], log=log)
+        narrow, _, _ = fit(line, configs, order=NARROW["order"], scale=NARROW["scale"], log=log,
+                           aperture_line=aperture_line)
         narrow.save(NARROW["path"].with_name(NARROW["path"].stem + tag + ".npz"))
     finally:
-        for q in quad_offsets:
-            line.line[q].shift_x, line.line[q].shift_y = 0.0, 0.0
+        for ln in lines:
+            for q in quad_offsets:
+                ln.line[q].shift_x, ln.line[q].shift_y = 0.0, 0.0
+            for c in kicks or {}:
+                ln.set_corrector(c, 0.0, 0.0)
     return load_combined(tag)
