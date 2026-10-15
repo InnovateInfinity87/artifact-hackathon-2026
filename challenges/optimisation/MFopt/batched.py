@@ -61,7 +61,10 @@ def _segment(env: OpticsEnv) -> _BatchSegment:
     return env._batch_segment
 
 
-def _track(env: OpticsEnv, columns: dict[str, np.ndarray], count: int):
+def _track(env: OpticsEnv, columns: dict[str, np.ndarray], count: int,
+           coordinates: np.ndarray | None = None):
+    """`coordinates`, (count, particles, 6), tracks a different beam per row instead
+    of the twin's nominal beam."""
     twin = env.twin
     segment = _segment(env)
     for name, knob in twin._knobs.items():
@@ -73,14 +76,17 @@ def _track(env: OpticsEnv, columns: dict[str, np.ndarray], count: int):
         segment.write(knob.element_name, knob.prop, tensor)
         for element, sign in knob.coupled:
             segment.write(element, knob.prop, sign * tensor)
-    coordinates = twin._coordinates
+    if coordinates is None:
+        coordinates = twin._coordinates
     particles = torch.tensor(
-        np.column_stack([coordinates, np.ones(len(coordinates))]), dtype=DTYPE
+        np.concatenate([coordinates, np.ones(coordinates.shape[:-1] + (1,))], axis=-1),
+        dtype=DTYPE,
     )
+    launched = coordinates.shape[-2]
     beam = cheetah.ParticleBeam(particles=particles, energy=twin.transport._energy)
     radius = twin.config.beam_pipe_radius
-    minimum = twin.config.min_screen_fraction * len(coordinates)
-    live = torch.ones((count, len(coordinates)), dtype=torch.bool)
+    minimum = twin.config.min_screen_fraction * launched
+    live = torch.ones((count, launched), dtype=torch.bool)
     names, stats = [], []
     with torch.no_grad():
         for stop, chunk in segment.chunks:
@@ -104,7 +110,7 @@ def _track(env: OpticsEnv, columns: dict[str, np.ndarray], count: int):
             row = torch.stack([mx, my, sx, sy], dim=1).double().numpy()
             row[(n < minimum).numpy()] = np.nan
             stats.append(row)
-    transmission = live.sum(dim=1).double().numpy() / len(coordinates)
+    transmission = live.sum(dim=1).double().numpy() / launched
     return np.stack(stats, axis=1), transmission, names
 
 
@@ -120,6 +126,23 @@ def probe_batch(
         n = len(next(iter(part.values())))
         full = {**{k: np.full(n, v) for k, v in base.items()}, **part}
         s, t, names = _track(env, full, n)
+        stats.append(s)
+        transmission.append(t)
+    return np.concatenate(stats), np.concatenate(transmission), names
+
+
+# Beams per vectorised track in `probe_beams`: each carries all its particles.
+BEAM_CHUNK = 48
+
+
+def probe_beams(env: OpticsEnv, coordinates: np.ndarray, settings: dict[str, float]):
+    """Track N different beams, `coordinates` (N, particles, 6), through one setting
+    of the twin (`settings` on top of the lattice file). Same returns as
+    `probe_batch`, one row per beam."""
+    stats, transmission, names = [], [], None
+    for start in range(0, len(coordinates), BEAM_CHUNK):
+        part = coordinates[start:start + BEAM_CHUNK]
+        s, t, names = _track(env, dict(settings), len(part), part)
         stats.append(s)
         transmission.append(t)
     return np.concatenate(stats), np.concatenate(transmission), names
