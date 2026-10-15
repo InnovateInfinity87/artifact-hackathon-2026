@@ -277,8 +277,12 @@ class XsuiteTransport(Transport):
         "ReferenceEnergyIncrease": ("Delta_p0c",),
     }
 
-    def __init__(self, model, segment, lattice_json, start, end, energy_ev, stops):
-        self.converted = model.build_line(energy_ev, lattice_json, start, end)
+    def __init__(
+        self, model, segment, lattice_json, start, end, energy_ev, stops, apertures
+    ):
+        self.converted = model.build_line(
+            energy_ev, lattice_json, start, end, apertures
+        )
         self._model = model
         self._segment = segment
         self._line = self.converted.line
@@ -498,7 +502,7 @@ class SimEnv(BaseAcceleratorEnv):
         # and the screen geometry, which an xsuite line has no notion of (every
         # diagnostic converts to a marker). One of the two models then tracks it.
         self.segment = self.model.cheetah_segment(
-            lattice_json, config.lattice_start, config.lattice_end
+            lattice_json, config.lattice_start, config.lattice_end, config.apertures
         )
 
         self._diagnostics = {
@@ -625,6 +629,7 @@ class SimEnv(BaseAcceleratorEnv):
                 self.config.lattice_end,
                 energy_ev,
                 stops,
+                self.config.apertures,
             )
         raise ValueError(
             f"{self.config.backend!r} is not a backend: "
