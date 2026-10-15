@@ -11,6 +11,10 @@ excitation, no wakefields, and L4H off**. Apply all **46** quadrupole settings:
 requested sizes. Using only the four variable settings on the nominal lattice
 would give a different beam.
 
+The default lattice file and the SimEnv now run the VBC at 131.7 mrad (R56 =
+−57.6 mm) with L4H on, so this family does not reproduce its target sizes in the
+default SimEnv; `MFopt/` re-matches the final focus for that case.
+
 ## Quick start
 
 Run from the repository root using the existing environment:
