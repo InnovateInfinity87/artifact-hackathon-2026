@@ -131,15 +131,17 @@ FEA_L4H_MATCH = {
 }
 
 
-def no_tdc_plan(line, phases=(-30.0, -23.0, -15.0, -8.0, 0.0), rescale=True, fea_match=None):
+def no_tdc_plan(line, phases=(-30.0, -23.0, -15.0, -8.0, 0.0), rescale=True, fea_match=None,
+                fea_screen="cla_fea_dia_scr_01"):
     """Transverse block of the 21-image plan (S02-03, S03-01, S04-03 under nominal, s02a,
     s02b, s02c) and the FEA-01 spectrometer setting at several L02 phases, TDC off.
-    `fea_match` adds upstream quadrupole settings to the FEA images (FEA_L4H_MATCH)."""
+    `fea_match` adds quadrupole settings to the FEA images (FEA_L4H_MATCH, spectrometer
+    optics); `fea_screen` is the screen they are taken on."""
     plan = {c.name: c for c in full6d.make_plan(line)}
     screens = ["cla_s02_dia_scr_03", "cla_s03_dia_scr_01", "cla_s04_dia_scr_03"]
     configs = [full6d.Config(n, plan[n].k1, 0.0, screens) for n in ("nominal_off", "s02a", "s02b", "s02c")]
     fea_k1 = {**plan["fea_01_off"].k1, **(fea_match or {})}
     for p in phases:
-        configs.append(full6d.Config(f"fea_01_ph{p:+.0f}", fea_k1, 0.0, ["cla_fea_dia_scr_01"], {L02: p}, rescale))
+        configs.append(full6d.Config(f"fea_{fea_screen[-2:]}_ph{p:+.0f}", fea_k1, 0.0, [fea_screen], {L02: p}, rescale))
     keys = [(c.name, s) for c in configs for s in c.screens]
     return configs, keys
