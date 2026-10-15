@@ -26,10 +26,10 @@ class Config:
     target:tuple=(.001,.001)
     backend:str='cheetah'
     particles:int=10000
-    repeats:int=3
-    thread_budget:int=40
-    optics_budget:int=35
-    center_budget:int=25
+    repeats:int=1
+    thread_budget:int=8
+    optics_budget:int=12
+    center_budget:int=4
     beam_variation:float=1.
     misalignment_variation:float=1.
     beam_jitter:float=.1
@@ -37,6 +37,17 @@ class Config:
     bpm_noise:float=0.
     steering_cap:float=.002
     quad_cap:float=2.
+    strategy:str='few_shot'
+    size_tolerance:float=.15
+    focus_mismatch_tolerance:float=.15
+    center_tolerance:float=.1
+    min_transmission:float=.9
+    patience:int=3
+    objective_noise_floor:float=.02
+    model_particles:int=2000
+    model_corrections:int=2
+    model_trust:float=.2
+    search_trust:float=.1
 
 def clean(value):
     if isinstance(value,np.ndarray):return value.tolist()
@@ -170,7 +181,7 @@ def center_stage(machine,models,config,method,out):
     session.save(out/f'{method}_centering.json')
     return info
 
-def run(config,out):
+def run_fixed_budget(config,out):
     run_started=time.perf_counter();timings={}
     out=Path(out).resolve();out.mkdir(parents=True,exist_ok=False)
     if min(config.thread_budget,config.optics_budget,config.center_budget,config.repeats,config.particles)<1:raise ValueError('Budgets, particles and repeats must be positive')
@@ -236,3 +247,11 @@ def run(config,out):
     for name,result in summary['branches'].items():
         f=result['final'];print(f"{name}: {result['status']}; transmission={f['transmission']:.3f}, centroid=({f['mu_x']*1e3:.3f}, {f['mu_y']*1e3:.3f}) mm, sigma=({f['sigma_x']*1e3:.3f}, {f['sigma_y']*1e3:.3f}) mm",flush=True)
     return summary
+
+
+def run(config,out):
+    if config.strategy=='few_shot':
+        from .few_shot import run as adaptive_run
+        return adaptive_run(config,out)
+    if config.strategy=='fixed_budget':return run_fixed_budget(config,out)
+    raise ValueError(f'Unknown strategy: {config.strategy}')

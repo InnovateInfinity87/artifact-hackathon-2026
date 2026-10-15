@@ -1,6 +1,31 @@
 # Stochastic SVD tuning
 
-This directory contains the staged optimization workflow, its CLI, tests, diagnostic plots and saved runs. It calls the actual `RL_framework/rl_framework/envs/sim_env.py` environment and the BO and RCDS implementations in `section-opt/`. RCDS means **robust conjugate-direction search**, as agreed; it is not conjugate gradient.
+This directory contains the staged optimization workflow, its CLI, tests and compact current results. It calls the actual `RL_framework/rl_framework/envs/sim_env.py` environment and the BO and RCDS implementations in `section-opt/`. RCDS means **robust conjugate-direction search**, as agreed; it is not conjugate gradient.
+
+## Current results
+
+[RESULTS.md](RESULTS.md) is the current result summary, with [compact per-episode JSON](results/latest_results.json). In the final 100-episode Cheetah run, BO used **5.64 shots** and RCDS **6.20 shots** on average (median 6 for both). Mean compute times per method were **4.14 s** and **4.01 s**; the complete parallel batch took **177.78 s**. These are simulation/model/optimizer compute times, not real-machine acquisition times. All branches retained beam; residual quality and final tolerance hit rates are reported separately.
+
+[Episode-step histograms](../talk_figures/model_svd_opt/model_svd_opt_100_episodes_steps.png) and [score histograms](../talk_figures/model_svd_opt/model_svd_opt_100_episodes_score.png) are exported as PNG/PDF with a reproducible data snapshot under `talk_figures/model_svd_opt/`. Raw run artifacts and superseded results have been removed.
+
+## Current default: adaptive single-shot tuning
+
+`few_shot` is now the default strategy. It uses one fresh shot per proposal, reuses the reset reading, skips threading when beam already reaches the IP, and has no separate discovery/replay overhead. The hard ceilings are 8 threading, 12 optics and 4 final-centering shots per method; these are ceilings, not targets. Reset readings are counted separately.
+
+The optics stage first tries at most two nominal Cheetah model corrections inside the **same five fractional-beta singular modes**. Each prediction is anchored to the latest measured RMS sizes. Up to five additional nominal-model iterations refine each proposal without spending beam shots. The model tracks nominal particles only; the optimizer never reads episode coordinates, hidden misalignments or RNG state. Remaining corrections use the selected section-opt BO or RCDS method within a local modal trust box.
+
+Stopping follows the peer implementations:
+
+- **MBRL-style tolerance:** stop when the size-only mismatch, `mean(abs(sigma/target - 1)) + 2*(1-on_screen_fraction)`, is at most 0.15 and the on-screen fraction is at least 0.9. This is an aggregate shape/loss tolerance, not a guarantee that each plane is within 15% on every stochastic shot.
+- **MBRL-style patience:** stop after three proposals without improvement exceeding the larger of the configured noise floor (0.02 objective units) and the marginal benchmark shot cost.
+- **MF-BO-style value of information:** BO stops if the maximum GP expected improvement on its sampled candidate set is below `0.5*log2((51+n)/(50+n))`. Existing measurements initialize the search without a duplicate acquisition. Model corrections also require predicted gain above shot cost/noise.
+- **Final centering:** use only the last two correctors per plane. Try the inverse-response correction once. If needed, use that measured change to calibrate the response gain per plane and make a second inverse correction; invoke RCDS only if the measured centroid still exceeds 0.1 requested RMS size in either plane. The two observable centroid combinations remove the corrector null directions. Reserve a restoration shot for a clearly better measured setting.
+
+Both branches independently reset to the same episode seed and run the same threading policy. Every later `env.step` retains the framework's live stochasticity. There is no per-step reseeding, repeated-shot averaging or automatic final verification batch. The last actual acquired reading is scored. If an existing measurement is adequate, that stage costs zero shots.
+
+The final centering shot also provides a fresh size measurement; shot jitter can move that final size outside the earlier stopping tolerance. `target_met` records the stricter final per-plane size/centroid checks separately from `completed` (which means the stages ended with beam on screen). Independent performance verification would cost extra shots and is not silently treated as free.
+
+The original fixed-budget protocol remains available with `--strategy fixed_budget --repeats 3 --thread-budget 40 --optics-budget 35 --center-budget 25`. The historical stage descriptions below refer to that original experiment unless specified otherwise.
 
 ## Run
 
@@ -13,7 +38,7 @@ uv pip sync --python .venv/bin/python model-svd_opt/requirements.lock
   --output model-svd_opt/results/my_run --seed 42 --target-mm 1 1
 ```
 
-The output directory must be new. Default tracking uses Cheetah, 10,000 particles and three independent shots per objective evaluation. Use `--backend xsuite` for Xsuite, `--particles 200000` for the full distribution, and `--optics-budget 100 --center-budget 60` for longer searches. Xsuite compiles local tracking kernels on first use. No wakefields are added. L4H is a **0.75 m drift**; the VBC remains powered at the matched family's 0.13169935 rad magnitude.
+The output directory must be new. Default tracking uses Cheetah, 10,000 particles and one fresh shot per proposal with adaptive stopping. Use `--backend xsuite` for Xsuite, `--particles 200000` for the full distribution, and `--optics-budget 100 --center-budget 60` for longer searches. Xsuite compiles local tracking kernels on first use. No wakefields are added. L4H is a **0.75 m drift**; the VBC remains powered at the matched family's 0.13169935 rad magnitude.
 
 Several episodes, with independent machine seeds and log-uniform target sizes within the spline's 0.1–20 mm domain:
 
@@ -33,7 +58,7 @@ from run_workflow import Config, run
 run(Config(seed=43, target=(0.001, 0.0005)), "model-svd_opt/results/custom")
 ```
 
-## Stages
+## Historical fixed-budget stages
 
 1. **Nominal calibration and stochastic reset.** `optics_matching_vbc_on.MatchedOptics(l4h_off=True)` supplies strengths for the episode's requested sizes. Ideal horizontal and vertical orbit responses are evaluated directly with `orbit_matching.vbc_reference.ReferenceOrbitEngine` using the selected tracking backend. This also handles off-grid targets without using a stale response interpolation. `SimEnv.reset(seed=...)` supplies the per-episode beam uncertainty, quadrupole/sextupole misalignments and diagnostic offsets.
 2. **Threading.** Keep the IP screen selected, so no upstream interceptive screen shadows downstream BPMs. Start with the contiguous valid BPM prefix plus the next missing BPM. Recompute up to three leading right-singular directions in **each** plane on that objective prefix. For a complete BPM prefix, use the full calibrated matrix including the IP row with squared-error weight five (row multiplier √5). Earlier prefixes use equally weighted BPM rows. Thus the allowed six steering combinations adapt to the loss location instead of relying on downstream correctors before beam gets there. With fewer resolved rows, use fewer nonzero modes.
@@ -46,13 +71,13 @@ run(Config(seed=43, target=(0.001, 0.0005)), "model-svd_opt/results/custom")
 
 ## Stochasticity, bounds and comparisons
 
-Every measurement and restoration calls `env.step`. SimEnv draws a fresh beam each time with `beam_variation * beam_jitter`; power-supply ripple is also redrawn and restored by SimEnv. Defaults are beam variation 1, misalignment variation 1, beam jitter 0.1, fractional supply ripple 0.001, and BPM noise 0 m. All are CLI options. Repeated shots are averaged, with majority-valid BPM/camera masks and sample standard errors. No frozen bunch or hidden-state inverse is used.
+Every measurement and restoration calls `env.step`. SimEnv draws a fresh beam each time with `beam_variation * beam_jitter`; power-supply ripple is also redrawn and restored by SimEnv. Defaults are beam variation 1, misalignment variation 1, beam jitter 0.1, fractional supply ripple 0.001, and BPM noise 0 m. All are CLI options. In fixed-budget mode repeated shots are averaged, with majority-valid BPM/camera masks and sample standard errors. No frozen bunch or hidden-state inverse is used.
 
 Both optics branches reconstruct SimEnv from the same episode lattice and seed and replay the same complete threading action sequence. Reset shots and replay shots are logged and count toward the reported acquisition cost. The replay records maximum BPM differences against the discovery run and between the branch starts; it asserts identical availability masks and rejects a difference above 100 µm. Exact equality is reported only when observed. The per-step jitter draws remain live throughout each optimization; the methods may consume different numbers of shots after the shared start.
 
 Controls use native `k1` in m⁻² and corrector angle in **radians**, never currents. The existing SimEnv computes limits using its ±100 A calibration, including its existing extension of ranges to include a lattice's nominal setting. This workflow does not enlarge those native limits. Affine modal boxes allocate each magnet's available headroom across modes, ensuring every optimizer proposal lies inside all bounds **without per-magnet clipping**. Degenerate dimensions are removed and recorded. Default threading amplitudes are capped at 2 mrad per mode and quadrupole amplitudes at 2 m⁻², further limited by response sensitivity and hardware headroom. These conservative boxes do not span the entire feasible native polytope.
 
-`--thread-budget`, `--optics-budget` and `--center-budget` are counts of repeated-shot objective evaluations, not individual shots. Threading includes its restore/verification evaluations in its budget. Optics and centering each add one repeated-shot final verification outside their search budget. The model-response calculations use ideal reference tracking and are separate from measured shots. The environment's truncation limit includes headroom for all stages; every measured shot appears in `shots.jsonl` with its native environment evaluation counter. RCDS may spend many evaluations on one direction; a short smoke-test budget need not explore all five optics modes.
+In fixed-budget mode, `--thread-budget`, `--optics-budget` and `--center-budget` are counts of repeated-shot objective evaluations, not individual shots. In few-shot mode they cap actual acquired shots. Threading includes its restore/verification evaluations in its budget. Optics and centering each add one repeated-shot final verification outside their search budget. The model-response calculations use ideal reference tracking and are separate from measured shots. The environment's truncation limit includes headroom for all stages; every measured shot appears in `shots.jsonl` with its native environment evaluation counter. RCDS may spend many evaluations on one direction; a short smoke-test budget need not explore all five optics modes.
 
 ## Outputs and checks
 
@@ -71,7 +96,7 @@ Each episode saves:
 .venv/bin/python model-svd_opt/report.py model-svd_opt/results/my_run
 ```
 
-`verify_run.py` checks modal membership of all measured quadrupole settings, the four-corrector restriction, changing readings on repeated stochastic shots, and every environment shot counter. Validation runs and numerical outcomes are recorded in `VALIDATION.md`. Neither apertures nor the camera field of view guarantee that all 144 target labels are feasible; loss, noise and residual size errors remain explicit results.
+`verify_run.py` checks modal membership of all measured quadrupole settings, the four-corrector restriction, changing readings on repeated stochastic shots, and every environment shot counter. Current numerical outcomes are recorded in [ADAPTIVE_VALIDATION.md](ADAPTIVE_VALIDATION.md). Neither apertures nor the camera field of view guarantee that all 144 target labels are feasible; loss, noise and residual size errors remain explicit results.
 
 ## Shared dependencies repaired in this checkout
 
@@ -79,11 +104,12 @@ The VBC-on provider module and L4H-drift lattice were absent, so their shared pu
 
 ## 100-episode Cheetah export
 
-`run_ensemble.py` runs independent episode seeds in worker processes and saves both optimizer branches. The current batch uses seeds 42–141 with a fixed (1, 1) mm target and the standard 10,000-particle / three-repeat budgets:
+`run_ensemble.py` runs independent episode seeds in worker processes and saves both optimizer branches. The original batch used seeds 42–141 with a fixed (1, 1) mm target and 10,000 particles / three repeats. To reproduce its fixed budget:
 
 ```sh
 .venv/bin/python model-svd_opt/run_ensemble.py \
-  --output model-svd_opt/results/cheetah_100_episodes --episodes 100 --workers 8
+  --output model-svd_opt/results/cheetah_100_episodes --episodes 100 --workers 8 \
+  --strategy fixed_budget --repeats 3 --thread-budget 40 --optics-budget 35 --center-budget 25
 ```
 
 The output path must be new. `results.json` contains metadata, aggregate statistics, and the complete per-episode acquired-shot data. `metrics.json` is a smaller, periodically checkpointed export containing the per-episode/per-method scores, counts, timings, statuses and artifact paths. Each episode also has `episode.json`, its existing workflow artifacts and a log. Exceptions and beam-loss failures are retained as outcomes rather than replaced with different seeds.
@@ -102,3 +128,17 @@ The acquired data can be re-exported without tracking again:
 ```
 
 The first 100-episode batch required an exporter repair for NumPy metadata; this is recorded explicitly in the export metadata. No simulation seeds or measurements were replaced. Replay-check failures remain error outcomes. If BO finished before a later RCDS exception prevented a global workflow summary, its final verification score is reconstructed from its saved shot records and marked `recovered_from_saved_final_verification`. Overall branch wall time can be unavailable in that case; measured-shot wall time is still reported. Filter branch `status == "completed"` when comparing final scores; an error branch's last available reading is not a completed optimization result.
+
+### Validated adaptive run
+
+The adaptive 100-episode results are in [ADAPTIVE_VALIDATION.md](ADAPTIVE_VALIDATION.md): mean **5.64 BO shots** and **6.20 RCDS shots**, compared with 192 in the previous completed branches. The compact `results/latest_results.json` retains per-episode measurements, shots, scores, stop reasons and statistics without requiring the intermediate tracking files.
+
+```sh
+.venv/bin/python model-svd_opt/run_ensemble.py \
+  --output model-svd_opt/results/my_adaptive_run --episodes 100 --workers 8
+.venv/bin/python model-svd_opt/adaptive_report.py model-svd_opt/results/my_adaptive_run
+```
+
+## Retained artifacts
+
+Only compact current episode metrics, the completed audit and source checksums are retained under `results/`. Raw shots, lattice snapshots, response arrays, run logs, source snapshot copies and superseded pilot/fixed-budget results were removed. The commands above describe outputs generated by a new run; those raw artifacts are not bundled. Talk figures and their compact data snapshot remain under `talk_figures/model_svd_opt/`.
