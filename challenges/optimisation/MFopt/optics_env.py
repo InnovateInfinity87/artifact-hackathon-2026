@@ -41,7 +41,7 @@ for path in (CHALLENGE_DIR, CHALLENGE_DIR / "RL_framework"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from optics_matching import MatchedOptics  # noqa: E402
+from optics_matching import MatchedOptics, SizeModes  # noqa: E402
 from rl_framework.config import RLConfig  # noqa: E402
 from rl_framework.envs.sim_env import BPM_TAG, SCREEN_TAG, SimEnv  # noqa: E402
 
@@ -85,6 +85,9 @@ class TargetOptics:
     achieved: tuple[float, float]  # (sigma_x, sigma_y) in the model, metres
     transmission: float  # in the model, to the readout
     clipped: list[str] = field(default_factory=list)  # pinned at a limit
+    # `SizeModes().evaluate` at the same request (clamped to its 0.1 to 20 mm
+    # domain): the SVD analysis's own quadrupole modes, for the VBC-off family.
+    size_modes: dict | None = None
 
     @property
     def vectors(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -106,6 +109,7 @@ class OpticsEnv(SimEnv):
     def __init__(self, config: RLConfig | None = None):
         super().__init__(config or RLConfig())
         self._matched = MatchedOptics()
+        self._size_modes = SizeModes()
         self._twin: SimEnv | None = None
         self._optics_cache: dict[tuple[float, float, float], TargetOptics] = {}
 
@@ -225,8 +229,8 @@ class OpticsEnv(SimEnv):
         if key in self._optics_cache:
             return self._optics_cache[key]
         lo, hi = self._matched.axis[0], self._matched.axis[-1]
-        start = self._matched.evaluate(np.clip(sigma_x, lo, hi),
-                                       np.clip(sigma_y, lo, hi))["settings"]
+        inside = (float(np.clip(sigma_x, lo, hi)), float(np.clip(sigma_y, lo, hi)))
+        start = self._matched.evaluate(*inside)["settings"]
         k1, clipped = self._match((sigma_x, sigma_y), start)
 
         def log_size(plus, minus, base, step):
@@ -246,7 +250,8 @@ class OpticsEnv(SimEnv):
             target=(float(sigma_x), float(sigma_y)), k1=k1,
             quadrupoles=quads, correctors=kicks,
             achieved=(float(readout[2]), float(readout[3])),
-            transmission=final["transmission"], clipped=clipped)
+            transmission=final["transmission"], clipped=clipped,
+            size_modes=self._size_modes.evaluate(*inside))
         self._optics_cache[key] = result
         return result
 
