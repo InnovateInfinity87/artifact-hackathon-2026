@@ -124,7 +124,7 @@ VBC_EDGE = {
     "cla_vbc_mag_dip_03": "exit",
     "cla_vbc_mag_dip_04": "entry",
 }
-VBC_MAX_ANGLE = 0.12  # rad
+VBC_MAX_ANGLE = 0.135  # rad, R56 = -60.5 mm: the top of the range quoted for CLARA (IPAC THP2100)
 
 # ---- how far one episode's machine is from the next, at a variation of 1 ---- #
 

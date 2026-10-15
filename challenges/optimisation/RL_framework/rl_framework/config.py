@@ -138,7 +138,7 @@ class RLConfig:
     include_cavity_phases: bool = True
     cavity_phase_range: float = 30.0  # degrees either side of nominal
 
-    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 120 mrad.
+    # Offer the VBC chicane as a knob: four dipoles on one setting, up to 135 mrad.
     # With the cavity phases, it is the handle on the energy spread at the readout.
     # `score.TUNABLE_BY_NAME` allows the four VBC angles, so a tune that moves them
     # is scorable; every other dipole in the line is geometry and stays fixed.
